@@ -1,6 +1,6 @@
 diff --git a/klippy/extras/cs1237.py b/klippy/extras/cs1237.py
 new file mode 100644
-index 000000000..432220d44
+index 0000000000..432220d44e
 --- /dev/null
 +++ b/klippy/extras/cs1237.py
 @@ -0,0 +1,169 @@
@@ -174,7 +174,7 @@ index 000000000..432220d44
 +
 +CS1237_SENSOR_TYPE = {"cs1237": CS1237, "c_sensor": CS1237}
 diff --git a/klippy/extras/load_cell.py b/klippy/extras/load_cell.py
-index 361c937fc..463529ba4 100644
+index 5ba7467cc3..cbc2eab9f1 100644
 --- a/klippy/extras/load_cell.py
 +++ b/klippy/extras/load_cell.py
 @@ -5,6 +5,7 @@
@@ -183,42 +183,41 @@ index 361c937fc..463529ba4 100644
  from . import hx71x
 +from . import cs1237
  from . import ads1220
+ from . import ads131m0x
  from .bulk_sensor import BatchWebhooksClient
- import collections, itertools
-@@ -523,6 +524,7 @@ def load_config(config):
+@@ -533,6 +534,7 @@
      # Sensor types
      sensors = {}
      sensors.update(hx71x.HX71X_SENSOR_TYPES)
 +    sensors.update(cs1237.CS1237_SENSOR_TYPE)
      sensors.update(ads1220.ADS1220_SENSOR_TYPE)
+     sensors.update(ads131m0x.ADS131M0X_SENSOR_TYPES)
      sensor_class = config.getchoice('sensor_type', sensors)
-     return LoadCell(config, sensor_class(config))
 diff --git a/klippy/extras/load_cell_probe.py b/klippy/extras/load_cell_probe.py
-index 1e361d5d1..1305403e5 100644
+index 6e6ac9cc66..8f2402cea8 100644
 --- a/klippy/extras/load_cell_probe.py
 +++ b/klippy/extras/load_cell_probe.py
-@@ -5,7 +5,7 @@
- # This file may be distributed under the terms of the GNU GPLv3 license.
+@@ -6,6 +6,7 @@
  import logging, math
  import mcu
--from . import probe, trigger_analog, load_cell, hx71x, ads1220
-+from . import probe, trigger_analog, load_cell, hx71x, cs1237, ads1220
- 
- np = None  # delay NumPy import until configuration time
- 
-@@ -477,6 +477,7 @@ class LoadCellPrinterProbe:
+ from . import hx71x
++from . import cs1237
+ from . import ads1220
+ from . import ads131m0x
+ from . import probe, manual_probe, trigger_analog, load_cell
+@@ -485,6 +486,7 @@
          # Sensor types supported by load_cell_probe
          sensors = {}
          sensors.update(hx71x.HX71X_SENSOR_TYPES)
 +        sensors.update(cs1237.CS1237_SENSOR_TYPE)
          sensors.update(ads1220.ADS1220_SENSOR_TYPE)
+         sensors.update(ads131m0x.ADS131M0X_SENSOR_TYPES)
          sensor_class = config.getchoice('sensor_type', sensors)
-         sensor = sensor_class(config)
 diff --git a/klippy/mcu.py b/klippy/mcu.py
-index 909b8ddb5..0d79d17e5 100644
+index 5f980d5eb6..617b8d85c5 100644
 --- a/klippy/mcu.py
 +++ b/klippy/mcu.py
-@@ -253,7 +253,7 @@ class MCU_trsync:
+@@ -276,7 +276,7 @@
              s.note_homing_end()
          return params['trigger_reason']
  
@@ -228,10 +227,10 @@ index 909b8ddb5..0d79d17e5 100644
  
  class TriggerDispatch:
 diff --git a/src/Kconfig b/src/Kconfig
-index 9c9790ff7..edc3f3506 100644
+index 66b0c475dc..6e6f5351ed 100644
 --- a/src/Kconfig
 +++ b/src/Kconfig
-@@ -164,6 +164,10 @@ config WANT_HX71X
+@@ -164,6 +164,10 @@
      bool
      depends on HAVE_GPIO
      default y
@@ -239,47 +238,60 @@ index 9c9790ff7..edc3f3506 100644
 +    bool
 +    depends on HAVE_GPIO
 +    default y
- config WANT_ADS1220
+ config WANT_ADS131M0X
      bool
      depends on WANT_SPI
-@@ -179,11 +183,11 @@ config WANT_SENSOR_ANGLE
+@@ -183,11 +187,11 @@
  config NEED_SENSOR_BULK
      bool
      depends on WANT_ADXL345 || WANT_LIS2DW || WANT_BMI160 || WANT_MPU9250 || WANT_ICM20948 \
--        || WANT_HX71X || WANT_ADS1220 || WANT_LDC1612 || WANT_SENSOR_ANGLE
-+        || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_LDC1612 || WANT_SENSOR_ANGLE
+-        || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612 || WANT_SENSOR_ANGLE
++        || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612 || WANT_SENSOR_ANGLE
      default y
  config WANT_TRIGGER_ANALOG
      bool
--    depends on WANT_HX71X || WANT_ADS1220 || WANT_LDC1612
-+    depends on WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_LDC1612
+-    depends on WANT_ADC || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
++    depends on WANT_ADC || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
      default y
  config NEED_SOS_FILTER
      bool
-@@ -252,6 +256,9 @@ config WANT_THERMOCOUPLE
+@@ -256,6 +260,9 @@
  config WANT_HX71X
      bool "Support HX711 and HX717 ADC chips"
      depends on HAVE_GPIO
 +config WANT_CS1237
 +    bool "Support CS1237 ADC chip"
 +    depends on HAVE_GPIO
- config WANT_ADS1220
-     bool "Support ADS 1220 ADC chip"
+ config WANT_ADS131M0X
+     bool "Support ADS 131M02/M04 ADC chips"
      depends on WANT_SPI
+@@ -271,10 +278,10 @@
+     bool "Support angle sensors"
+     depends on WANT_SPI
+ comment "Other features"
+-    depends on WANT_ADC || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
++    depends on WANT_ADC || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
+ config WANT_TRIGGER_ANALOG
+     bool "Support for homing/probing events using analog sensors"
+-    depends on WANT_ADC || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
++    depends on WANT_ADC || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
+ endmenu
+ 
+ # Generic configuration options for CANbus
 diff --git a/src/Makefile b/src/Makefile
-index 4432656a9..689e775ec 100644
+index fe99d0e019..90466f6b78 100644
 --- a/src/Makefile
 +++ b/src/Makefile
-@@ -24,6 +24,7 @@ src-$(CONFIG_WANT_BMI160) += sensor_bmi160.c
+@@ -24,6 +24,7 @@
  src-$(CONFIG_WANT_MPU9250) += sensor_mpu9250.c
  src-$(CONFIG_WANT_ICM20948) += sensor_icm20948.c
  src-$(CONFIG_WANT_HX71X) += sensor_hx71x.c
 +src-$(CONFIG_WANT_CS1237) += sensor_cs1237.c
  src-$(CONFIG_WANT_ADS1220) += sensor_ads1220.c
+ src-$(CONFIG_WANT_ADS131M0X) += sensor_ads131m0x.c
  src-$(CONFIG_WANT_LDC1612) += sensor_ldc1612.c
- src-$(CONFIG_WANT_SENSOR_ANGLE) += sensor_angle.c
 diff --git a/src/generic/usb_cdc_ep.h b/src/generic/usb_cdc_ep.h
-index 3b0e6beb1..3de6da2ca 100644
+index 3b0e6beb12..3de6da2ca7 100644
 --- a/src/generic/usb_cdc_ep.h
 +++ b/src/generic/usb_cdc_ep.h
 @@ -1,16 +1,28 @@
@@ -314,7 +326,7 @@ index 3b0e6beb1..3de6da2ca 100644
      USB_CDC_EP_BULK_IN_SIZE = 64,
 diff --git a/src/sensor_cs1237.c b/src/sensor_cs1237.c
 new file mode 100644
-index 000000000..9996d8b76
+index 0000000000..9996d8b763
 --- /dev/null
 +++ b/src/sensor_cs1237.c
 @@ -0,0 +1,412 @@
@@ -731,10 +743,10 @@ index 000000000..9996d8b76
 +}
 +DECL_TASK(cs1237_capture_task);
 diff --git a/src/stm32/Kconfig b/src/stm32/Kconfig
-index c8466df38..b553188c6 100644
+index da1b474425..2b3768ec3a 100644
 --- a/src/stm32/Kconfig
 +++ b/src/stm32/Kconfig
-@@ -382,6 +382,15 @@ config STM32F0_TRIM
+@@ -383,6 +383,15 @@
          Default is 16 (use factory default). Each increment increases
          the clock rate by ~240KHz.
  
@@ -751,7 +763,7 @@ index c8466df38..b553188c6 100644
  ######################################################################
  # Communication inteface
 diff --git a/src/stm32/usbotg.c b/src/stm32/usbotg.c
-index b41daf48c..cbe2f7d75 100644
+index 6e30836960..6df6cda1ce 100644
 --- a/src/stm32/usbotg.c
 +++ b/src/stm32/usbotg.c
 @@ -11,6 +11,7 @@
@@ -762,7 +774,7 @@ index b41daf48c..cbe2f7d75 100644
  #include "internal.h" // GPIO
  #include "sched.h" // DECL_INIT
  
-@@ -67,6 +68,65 @@ usb_irq_enable(void)
+@@ -67,6 +68,65 @@
  #define EPOUT(EP) ((USB_OTG_OUTEndpointTypeDef*)                        \
                     (USB_PERIPH_BASE + USB_OTG_OUT_ENDPOINT_BASE + ((EP) << 5)))
  
@@ -828,7 +840,7 @@ index b41daf48c..cbe2f7d75 100644
  // Setup the USB fifos
  static void
  fifo_configure(void)
-@@ -169,11 +229,59 @@ enable_rx_endpoint(uint32_t ep)
+@@ -169,11 +229,59 @@
      USB_OTG_OUTEndpointTypeDef *epo = EPOUT(ep);
      uint32_t ctl = epo->DOEPCTL;
      if (!(ctl & USB_OTG_DOEPCTL_EPENA) || ctl & USB_OTG_DOEPCTL_NAKSTS) {
@@ -888,7 +900,7 @@ index b41daf48c..cbe2f7d75 100644
  // Inspect the next packet on the rx queue
  static uint32_t
  peek_rx_queue(uint32_t ep)
-@@ -213,6 +321,19 @@ int_fast8_t
+@@ -213,6 +321,19 @@
  usb_read_bulk_out(void *data, uint_fast8_t max_len)
  {
      usb_irq_disable();
@@ -908,7 +920,7 @@ index b41daf48c..cbe2f7d75 100644
      uint32_t grx = peek_rx_queue(USB_CDC_EP_BULK_OUT);
      if (!grx) {
          // Wait for packet
-@@ -222,6 +343,10 @@ usb_read_bulk_out(void *data, uint_fast8_t max_len)
+@@ -222,6 +343,10 @@
      }
      int_fast8_t ret = fifo_read_packet(data, max_len);
      enable_rx_endpoint(USB_CDC_EP_BULK_OUT);
@@ -919,7 +931,7 @@ index b41daf48c..cbe2f7d75 100644
      usb_irq_enable();
      return ret;
  }
-@@ -284,6 +409,9 @@ usb_read_ep0(void *data, uint_fast8_t max_len)
+@@ -285,6 +410,9 @@
      }
      int_fast8_t ret = fifo_read_packet(data, max_len);
      enable_rx_endpoint(0);
@@ -929,7 +941,7 @@ index b41daf48c..cbe2f7d75 100644
      usb_irq_enable();
      return ret;
  }
-@@ -325,6 +453,9 @@ usb_read_ep0_setup(void *data, uint_fast8_t max_len)
+@@ -326,6 +454,9 @@
      }
      enable_rx_endpoint(0);
      EPOUT(0)->DOEPINT = USB_OTG_DOEPINT_STUP;
@@ -939,7 +951,7 @@ index b41daf48c..cbe2f7d75 100644
      usb_irq_enable();
      // Return previously read setup packet
      memcpy(data, setup_buf, max_len);
-@@ -375,6 +506,10 @@ void
+@@ -376,6 +507,10 @@
  usb_set_configure(void)
  {
      usb_irq_disable();
@@ -950,7 +962,7 @@ index b41daf48c..cbe2f7d75 100644
      // Configure and enable USB_CDC_EP_ACM
      USB_OTG_INEndpointTypeDef *epi = EPIN(USB_CDC_EP_ACM);
      epi->DIEPTSIZ = (USB_CDC_EP_ACM_SIZE
-@@ -424,6 +559,9 @@ OTG_FS_IRQHandler(void)
+@@ -425,6 +560,9 @@
  {
      uint32_t sts = OTG->GINTSTS;
      if (sts & USB_OTG_GINTSTS_RXFLVL) {
@@ -960,7 +972,7 @@ index b41daf48c..cbe2f7d75 100644
          // Received data - disable irq and notify endpoint
          OTG->GINTMSK &= ~USB_OTG_GINTMSK_RXFLVLM;
          uint32_t grx = OTG->GRXSTSR, ep = grx & USB_OTG_GRXSTSP_EPNUM_Msk;
-@@ -431,11 +569,15 @@ OTG_FS_IRQHandler(void)
+@@ -432,11 +570,15 @@
              usb_notify_ep0();
          else
              usb_notify_bulk_out();
@@ -978,7 +990,7 @@ index b41daf48c..cbe2f7d75 100644
          if (pend & (1 << 0))
              usb_notify_ep0();
          if (pend & (1 << USB_CDC_EP_BULK_IN)) {
-@@ -448,6 +590,40 @@ OTG_FS_IRQHandler(void)
+@@ -449,6 +591,40 @@
              }
          }
      }
@@ -1019,7 +1031,7 @@ index b41daf48c..cbe2f7d75 100644
  }
  
  // Initialize the usb controller
-@@ -463,15 +639,40 @@ usb_init(void)
+@@ -464,15 +640,40 @@
  #else
      RCC->AHB2ENR |= RCC_AHB2ENR_OTGFSEN;
  #endif
@@ -1060,7 +1072,7 @@ index b41daf48c..cbe2f7d75 100644
  #else
      OTG->GCCFG |= USB_OTG_GCCFG_NOVBUSSENS;
  #endif
-@@ -482,24 +683,49 @@ usb_init(void)
+@@ -483,24 +684,49 @@
  
      // Setup USB packet memory
      fifo_configure();
