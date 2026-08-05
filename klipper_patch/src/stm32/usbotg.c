@@ -231,7 +231,8 @@ enable_rx_endpoint(uint32_t ep)
     if (!(ctl & USB_OTG_DOEPCTL_EPENA) || ctl & USB_OTG_DOEPCTL_NAKSTS) {
 #if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
         if (ep == 0) {
-            // Keep EP0 setup buffering enabled on GD32 after each control phase.
+            // Keep EP0 setup buffering enabled on GD32 after each
+            // control phase.
             epo->DOEPTSIZ = (64 | (3 << USB_OTG_DOEPTSIZ_STUPCNT_Pos)
                              | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
         } else {
@@ -249,12 +250,6 @@ enable_rx_endpoint(uint32_t ep)
 static uint8_t gd32_bulk_out_buf[USB_CDC_EP_BULK_OUT_SIZE];
 static volatile uint8_t gd32_bulk_out_len, gd32_bulk_out_ready;
 
-// IRQ path counters for diagnosing which interrupt delivers bulk OUT packets.
-// Read via debug_read order=2 from host after sending one bulk OUT write.
-static volatile uint32_t gd32_rxflvl_bulk_count;  // RXFLVL fired w/ pktsts==2
-static volatile uint32_t gd32_oepint_bulk_count;  // OEPINT fired for bulk OUT
-static volatile uint32_t gd32_notify_bulk_count;  // usb_notify_bulk_out() calls
-
 static int
 gd32_stage_bulk_out_packet(void)
 {
@@ -266,7 +261,6 @@ gd32_stage_bulk_out_packet(void)
                        >> USB_OTG_GRXSTSP_PKTSTS_Pos);
     if (pktsts != 2)
         return 0;
-    gd32_rxflvl_bulk_count++;
     if (!gd32_bulk_out_ready) {
         gd32_bulk_out_len = fifo_read_packet(gd32_bulk_out_buf
                                              , sizeof(gd32_bulk_out_buf));
@@ -276,7 +270,6 @@ gd32_stage_bulk_out_packet(void)
         fifo_read_packet(NULL, 0);
     }
     enable_rx_endpoint(USB_CDC_EP_BULK_OUT);
-    gd32_notify_bulk_count++;
     usb_notify_bulk_out();
     return 1;
 }
@@ -367,7 +360,8 @@ usb_send_bulk_in(void *data, uint_fast8_t len)
         usb_irq_enable();
         return len;
     }
-    if (ctl & USB_OTG_DIEPCTL_EPENA) {
+    int dbuf_busy = CONFIG_STM32_USB_DOUBLE_BUFFER_TX && TX_BUF.len;
+    if (ctl & USB_OTG_DIEPCTL_EPENA || dbuf_busy) {
         if (!CONFIG_STM32_USB_DOUBLE_BUFFER_TX || TX_BUF.len || !len) {
             // Wait for space to transmit
             OTGD->DAINTMSK |= 1 << USB_CDC_EP_BULK_IN;
@@ -595,9 +589,7 @@ OTG_FS_IRQHandler(void)
         uint32_t daint = OTGD->DAINT;
         if (daint & (1 << (16 + USB_CDC_EP_BULK_OUT))) {
             EPOUT(USB_CDC_EP_BULK_OUT)->DOEPINT = USB_OTG_DOEPINT_XFRC;
-            gd32_oepint_bulk_count++;
             enable_rx_endpoint(USB_CDC_EP_BULK_OUT);
-            gd32_notify_bulk_count++;
             usb_notify_bulk_out();
         }
         if (daint & (1 << 16)) {
@@ -605,8 +597,6 @@ OTG_FS_IRQHandler(void)
             usb_notify_ep0();
         }
     }
-#endif
-#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
     if (sts & USB_OTG_GINTSTS_USBRST) {
         // Ack reset; enumeration completion handler rearms EP0 OUT.
         OTG->GINTSTS = USB_OTG_GINTSTS_USBRST;
@@ -708,8 +698,10 @@ usb_init(void)
 
     // Enable interrupts
     OTGD->DIEPMSK = USB_OTG_DIEPMSK_XFRCM;
+#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
     OTGD->DOEPMSK = USB_OTG_DOEPMSK_XFRCM | USB_OTG_DOEPMSK_STUPM;
     OTGD->DAINTMSK = (1 << 16) | (1 << (16 + USB_CDC_EP_BULK_OUT));
+#endif
     OTG->GINTMSK = (USB_OTG_GINTMSK_RXFLVLM | USB_OTG_GINTMSK_IEPINT
 #if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
                     | USB_OTG_GINTMSK_OEPINT | USB_OTG_GINTMSK_USBRST

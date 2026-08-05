@@ -57,7 +57,6 @@ class CS1237:
         config_reg = (refout_off << 6) | (speed_sel << 4)
         config_reg |= (gain_bits << 2) | chan_sel
         # Bulk Sensor Setup
-        self.bulk_queue = bulk_sensor.BulkDataQueue(mcu, oid=self.oid)
         chip_smooth = self.sps * UPDATE_INTERVAL * 2
         self.ffreader = bulk_sensor.FixedFreqReader(mcu, chip_smooth, "<i")
         self.batch_bulk = bulk_sensor.BatchBulkHelper(
@@ -88,6 +87,13 @@ class CS1237:
 
     def get_samples_per_second(self):
         return self.sps
+
+    def get_status(self, eventtime):
+        return {
+            'errors': self.last_error_count,
+            'overflows': self.ffreader.get_last_overflows(),
+            'sample_rate': self.get_samples_per_second(),
+        }
 
     def lookup_sensor_error(self, error_code):
         if error_code == CS1237_ERR_CONFIG_TIMEOUT:
@@ -166,4 +172,4 @@ class CS1237:
                 'overflows': self.ffreader.get_last_overflows()}
 
 
-CS1237_SENSOR_TYPE = {"cs1237": CS1237, "c_sensor": CS1237}
+CS1237_SENSOR_TYPE = {"cs1237": CS1237}

@@ -1,0 +1,785 @@
+From 2e473990359c44516c75a7bf8e2d4792acfc4d8b Mon Sep 17 00:00:00 2001
+From: Ahmed Sheikh <ahmed.ali.sheikh1998@gmail.com>
+Date: Sun, 26 Jul 2026 10:44:57 -0400
+Subject: [PATCH 2/4] load_cell: add CS1237 ADC support
+
+---
+ docs/Config_Reference.md         |  23 ++
+ klippy/extras/cs1237.py          | 175 +++++++++++++
+ klippy/extras/load_cell.py       |   2 +
+ klippy/extras/load_cell_probe.py |   2 +
+ src/Kconfig                      |  15 +-
+ src/Makefile                     |   1 +
+ src/sensor_cs1237.c              | 414 +++++++++++++++++++++++++++++++
+ test/klippy/load_cell.cfg        |  14 +-
+ 8 files changed, 639 insertions(+), 7 deletions(-)
+ create mode 100644 klippy/extras/cs1237.py
+ create mode 100644 src/sensor_cs1237.c
+
+diff --git a/docs/Config_Reference.md b/docs/Config_Reference.md
+index e6b2e795..7861a375 100644
+--- a/docs/Config_Reference.md
++++ b/docs/Config_Reference.md
+@@ -5217,6 +5217,29 @@ dout_pin:
+ #   in software.
+ ```
+
++#### CS1237
++The CS1237 is a 24-bit ADC with software-selectable gain and sample rate. It is
++suitable for load-cell probing.
++```
++[load_cell]
++sensor_type: cs1237
++sclk_pin:
++#   The pin connected to the CS1237 clock line. This parameter must be
++#   provided.
++dout_pin:
++#   The bidirectional pin connected to the CS1237 data line. This parameter
++#   must be provided.
++#sample_rate: 1280
++#   Valid sample rates are 10, 40, 640, and 1280 samples per second. The
++#   default is 1280.
++#gain: 128
++#   Valid gain values are 1, 2, 64, and 128. The default is 128.
++#channel: A
++#   Valid channels are A, temperature, and short. The default is A.
++#refout_off: False
++#   Disable the CS1237 reference output when True. The default is False.
++```
++
+ #### ADS1220
+ The ADS1220 is a 24 bit ADC supporting up to a 2Khz sample rate configurable in
+ software.
+diff --git a/klippy/extras/cs1237.py b/klippy/extras/cs1237.py
+new file mode 100644
+index 00000000..d94c8f5c
+--- /dev/null
++++ b/klippy/extras/cs1237.py
+@@ -0,0 +1,175 @@
++# CS1237 Support
++#
++# Copyright (C) 2026  The Klipper project
++#
++# This file may be distributed under the terms of the GNU GPLv3 license.
++import logging
++from . import bulk_sensor
++
++#
++# Constants
++#
++UPDATE_INTERVAL = 0.10
++SAMPLE_ERROR_TIMEOUT = -0x80000000
++SAMPLE_ERROR_LONG_READ = 0x40000000
++SAMPLE_ERROR_CONFIG = 0x20000000
++
++# Sensor-specific trigger_analog errors (from sensor_cs1237.c)
++CS1237_ERR_CONFIG_TIMEOUT = 1
++CS1237_ERR_CONFIG_MISMATCH = 2
++CS1237_ERR_READ_TIMEOUT = 3
++CS1237_ERR_OVERFLOW = 4
++
++# Config register bit fields
++SAMPLE_RATE_OPTIONS = {10: 0, 40: 1, 640: 2, 1280: 3}
++GAIN_OPTIONS = {'1': 0, '2': 1, '64': 2, '128': 3}
++CHANNEL_OPTIONS = {'A': 0, 'temperature': 2, 'short': 3}
++
++
++class CS1237:
++    def __init__(self, config, calibration=None):
++        self.printer = printer = config.get_printer()
++        self.name = config.get_name().split()[-1]
++        self.last_error_count = 0
++        self.consecutive_fails = 0
++        self.query_cs1237_cmd = None
++        # Chip options
++        dout_pin_name = config.get('dout_pin')
++        sclk_pin_name = config.get('sclk_pin')
++        ppins = printer.lookup_object('pins')
++        dout_ppin = ppins.lookup_pin(dout_pin_name)
++        sclk_ppin = ppins.lookup_pin(sclk_pin_name)
++        self.mcu = mcu = dout_ppin['chip']
++        self.oid = mcu.create_oid()
++        if sclk_ppin['chip'] is not mcu:
++            raise config.error("%s config error: All pins must be "
++                               "connected to the same MCU" % (self.name,))
++        self.dout_pin = dout_ppin['pin']
++        self.sclk_pin = sclk_ppin['pin']
++        # Config register setup
++        self.sps = config.getchoice('sample_rate',
++                                    {k: k for k in SAMPLE_RATE_OPTIONS},
++                                    default=1280)
++        speed_sel = SAMPLE_RATE_OPTIONS[self.sps]
++        gain_bits = config.getchoice('gain', GAIN_OPTIONS, default='128')
++        chan_sel = config.getchoice('channel', CHANNEL_OPTIONS, default='A')
++        refout_off = int(config.getboolean('refout_off', default=False))
++        config_reg = (refout_off << 6) | (speed_sel << 4)
++        config_reg |= (gain_bits << 2) | chan_sel
++        # Bulk Sensor Setup
++        chip_smooth = self.sps * UPDATE_INTERVAL * 2
++        self.ffreader = bulk_sensor.FixedFreqReader(mcu, chip_smooth, "<i")
++        self.batch_bulk = bulk_sensor.BatchBulkHelper(
++            self.printer, self._process_batch, self._start_measurements,
++            self._finish_measurements, UPDATE_INTERVAL)
++        # Command configuration
++        mcu.add_config_cmd(
++            "config_cs1237 oid=%d config=%d dout_pin=%s sclk_pin=%s"
++            % (self.oid, config_reg, self.dout_pin, self.sclk_pin))
++        mcu.add_config_cmd("query_cs1237 oid=%d rest_ticks=0"
++                           % (self.oid,), on_restart=True)
++        mcu.register_config_callback(self._build_config)
++
++    def setup_trigger_analog(self, trigger_analog_oid):
++        self.mcu.add_config_cmd(
++            "cs1237_attach_trigger_analog oid=%d trigger_analog_oid=%d"
++            % (self.oid, trigger_analog_oid), is_init=True)
++
++    def _build_config(self):
++        cmd_queue = self.mcu.alloc_command_queue()
++        self.query_cs1237_cmd = self.mcu.lookup_command(
++            "query_cs1237 oid=%c rest_ticks=%u", cq=cmd_queue)
++        self.ffreader.setup_query_command("query_cs1237_status oid=%c",
++                                          oid=self.oid, cq=cmd_queue)
++
++    def get_mcu(self):
++        return self.mcu
++
++    def get_samples_per_second(self):
++        return self.sps
++
++    def get_status(self, eventtime):
++        return {
++            'errors': self.last_error_count,
++            'overflows': self.ffreader.get_last_overflows(),
++            'sample_rate': self.get_samples_per_second(),
++        }
++
++    def lookup_sensor_error(self, error_code):
++        if error_code == CS1237_ERR_CONFIG_TIMEOUT:
++            return "CS1237 config timeout"
++        if error_code == CS1237_ERR_CONFIG_MISMATCH:
++            return "CS1237 config mismatch"
++        if error_code == CS1237_ERR_READ_TIMEOUT:
++            return "CS1237 read timeout"
++        if error_code == CS1237_ERR_OVERFLOW:
++            return "CS1237 sample overflow"
++        return "Unknown cs1237 error %d" % (error_code,)
++
++    # returns a tuple of the minimum and maximum value of the sensor, used to
++    # detect if a data value is saturated
++    def get_range(self):
++        return -0x800000, 0x7FFFFF
++
++    # add_client interface, direct pass through to bulk_sensor API
++    def add_client(self, callback):
++        self.batch_bulk.add_client(callback)
++
++    # Measurement decoding
++    def _convert_samples(self, samples):
++        adc_factor = 1. / (1 << 23)
++        count = 0
++        for ptime, val in samples:
++            if val in (SAMPLE_ERROR_TIMEOUT, SAMPLE_ERROR_LONG_READ,
++                       SAMPLE_ERROR_CONFIG):
++                self.last_error_count += 1
++                break  # additional errors are duplicates
++            samples[count] = (round(ptime, 6), val, round(val * adc_factor, 9))
++            count += 1
++        del samples[count:]
++
++    # Start, stop, and process message batches
++    def _start_measurements(self):
++        self.consecutive_fails = 0
++        self.last_error_count = 0
++        # Start bulk reading
++        rest_ticks = self.mcu.seconds_to_clock(1. / (10. * self.sps))
++        self.query_cs1237_cmd.send([self.oid, rest_ticks])
++        logging.info("CS1237 starting '%s' measurements", self.name)
++        # Initialize clock tracking
++        self.ffreader.note_start()
++
++    def _finish_measurements(self):
++        # don't use serial connection after shutdown
++        if self.printer.is_shutdown():
++            return
++        # Halt bulk reading
++        self.query_cs1237_cmd.send_wait_ack([self.oid, 0])
++        self.ffreader.note_end()
++        logging.info("CS1237 finished '%s' measurements", self.name)
++
++    def _process_batch(self, eventtime):
++        prev_overflows = self.ffreader.get_last_overflows()
++        prev_error_count = self.last_error_count
++        samples = self.ffreader.pull_samples()
++        self._convert_samples(samples)
++        overflows = self.ffreader.get_last_overflows() - prev_overflows
++        errors = self.last_error_count - prev_error_count
++        if errors > 0:
++            logging.error("%s: Forced sensor restart due to error", self.name)
++            self._finish_measurements()
++            self._start_measurements()
++        elif overflows > 0:
++            self.consecutive_fails += 1
++            if self.consecutive_fails > 4:
++                logging.error("%s: Forced sensor restart due to overflows",
++                              self.name)
++                self._finish_measurements()
++                self._start_measurements()
++        else:
++            self.consecutive_fails = 0
++        return {'data': samples, 'errors': self.last_error_count,
++                'overflows': self.ffreader.get_last_overflows()}
++
++
++CS1237_SENSOR_TYPE = {"cs1237": CS1237}
+diff --git a/klippy/extras/load_cell.py b/klippy/extras/load_cell.py
+index 5ba7467c..cbc2eab9 100644
+--- a/klippy/extras/load_cell.py
++++ b/klippy/extras/load_cell.py
+@@ -5,6 +5,7 @@
+ # This file may be distributed under the terms of the GNU GPLv3 license.
+
+ from . import hx71x
++from . import cs1237
+ from . import ads1220
+ from . import ads131m0x
+ from .bulk_sensor import BatchWebhooksClient
+@@ -533,6 +534,7 @@ def load_config(config):
+     # Sensor types
+     sensors = {}
+     sensors.update(hx71x.HX71X_SENSOR_TYPES)
++    sensors.update(cs1237.CS1237_SENSOR_TYPE)
+     sensors.update(ads1220.ADS1220_SENSOR_TYPE)
+     sensors.update(ads131m0x.ADS131M0X_SENSOR_TYPES)
+     sensor_class = config.getchoice('sensor_type', sensors)
+diff --git a/klippy/extras/load_cell_probe.py b/klippy/extras/load_cell_probe.py
+index 6e6ac9cc..8f2402ce 100644
+--- a/klippy/extras/load_cell_probe.py
++++ b/klippy/extras/load_cell_probe.py
+@@ -6,6 +6,7 @@
+ import logging, math
+ import mcu
+ from . import hx71x
++from . import cs1237
+ from . import ads1220
+ from . import ads131m0x
+ from . import probe, manual_probe, trigger_analog, load_cell
+@@ -485,6 +486,7 @@ class LoadCellPrinterProbe:
+         # Sensor types supported by load_cell_probe
+         sensors = {}
+         sensors.update(hx71x.HX71X_SENSOR_TYPES)
++        sensors.update(cs1237.CS1237_SENSOR_TYPE)
+         sensors.update(ads1220.ADS1220_SENSOR_TYPE)
+         sensors.update(ads131m0x.ADS131M0X_SENSOR_TYPES)
+         sensor_class = config.getchoice('sensor_type', sensors)
+diff --git a/src/Kconfig b/src/Kconfig
+index 66b0c475..6e6f5351 100644
+--- a/src/Kconfig
++++ b/src/Kconfig
+@@ -164,6 +164,10 @@ config WANT_HX71X
+     bool
+     depends on HAVE_GPIO
+     default y
++config WANT_CS1237
++    bool
++    depends on HAVE_GPIO
++    default y
+ config WANT_ADS131M0X
+     bool
+     depends on WANT_SPI
+@@ -183,11 +187,11 @@ config WANT_SENSOR_ANGLE
+ config NEED_SENSOR_BULK
+     bool
+     depends on WANT_ADXL345 || WANT_LIS2DW || WANT_BMI160 || WANT_MPU9250 || WANT_ICM20948 \
+-        || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612 || WANT_SENSOR_ANGLE
++        || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612 || WANT_SENSOR_ANGLE
+     default y
+ config WANT_TRIGGER_ANALOG
+     bool
+-    depends on WANT_ADC || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
++    depends on WANT_ADC || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
+     default y
+ config NEED_SOS_FILTER
+     bool
+@@ -256,6 +260,9 @@ config WANT_THERMOCOUPLE
+ config WANT_HX71X
+     bool "Support HX711 and HX717 ADC chips"
+     depends on HAVE_GPIO
++config WANT_CS1237
++    bool "Support CS1237 ADC chip"
++    depends on HAVE_GPIO
+ config WANT_ADS131M0X
+     bool "Support ADS 131M02/M04 ADC chips"
+     depends on WANT_SPI
+@@ -271,10 +278,10 @@ config WANT_SENSOR_ANGLE
+     bool "Support angle sensors"
+     depends on WANT_SPI
+ comment "Other features"
+-    depends on WANT_ADC || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
++    depends on WANT_ADC || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
+ config WANT_TRIGGER_ANALOG
+     bool "Support for homing/probing events using analog sensors"
+-    depends on WANT_ADC || WANT_HX71X || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
++    depends on WANT_ADC || WANT_HX71X || WANT_CS1237 || WANT_ADS1220 || WANT_ADS131M0X || WANT_LDC1612
+ endmenu
+
+ # Generic configuration options for CANbus
+diff --git a/src/Makefile b/src/Makefile
+index fe99d0e0..90466f6b 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -24,6 +24,7 @@ src-$(CONFIG_WANT_BMI160) += sensor_bmi160.c
+ src-$(CONFIG_WANT_MPU9250) += sensor_mpu9250.c
+ src-$(CONFIG_WANT_ICM20948) += sensor_icm20948.c
+ src-$(CONFIG_WANT_HX71X) += sensor_hx71x.c
++src-$(CONFIG_WANT_CS1237) += sensor_cs1237.c
+ src-$(CONFIG_WANT_ADS1220) += sensor_ads1220.c
+ src-$(CONFIG_WANT_ADS131M0X) += sensor_ads131m0x.c
+ src-$(CONFIG_WANT_LDC1612) += sensor_ldc1612.c
+diff --git a/src/sensor_cs1237.c b/src/sensor_cs1237.c
+new file mode 100644
+index 00000000..68354fb0
+--- /dev/null
++++ b/src/sensor_cs1237.c
+@@ -0,0 +1,414 @@
++// Support for bit-banging commands to CS1237 ADC chips
++//
++// Copyright (C) 2026  The Klipper project
++//
++// This file may be distributed under the terms of the GNU GPLv3 license.
++
++#include <stdint.h>
++#include "autoconf.h" // CONFIG_MACH_AVR
++#include "basecmd.h" // oid_alloc
++#include "board/gpio.h" // gpio_out_write
++#include "board/irq.h" // irq_poll
++#include "board/misc.h" // timer_read_time
++#include "command.h" // DECL_COMMAND
++#include "sched.h" // sched_add_timer
++#include "sensor_bulk.h" // sensor_bulk_report
++#include "trigger_analog.h" // trigger_analog_update
++
++struct cs1237_adc {
++    struct timer timer;
++    uint8_t config;
++    uint8_t flags;
++    uint8_t sensor_error;
++    uint32_t rest_ticks;
++    uint32_t last_error;
++    int32_t last_sample;
++    struct gpio_in dout_in; // bidirectional data-ready / data pin
++    struct gpio_out dout_out;
++    struct gpio_out sclk;
++    struct sensor_bulk sb;
++    struct trigger_analog *ta;
++};
++
++enum {
++    CS_PENDING = 1 << 0, CS_OVERFLOW = 1 << 1,
++};
++
++// Internal sample error values reported over bulk transport
++#define BYTES_PER_SAMPLE 4
++#define SAMPLE_ERROR_TIMEOUT (1L << 31)
++#define SAMPLE_ERROR_READ_TOO_LONG (1L << 30)
++#define SAMPLE_ERROR_CONFIG (1L << 29)
++
++// Sensor-specific errors passed to trigger_analog_note_error()
++enum {
++    CSE_CONFIG_TIMEOUT = 1,
++    CSE_CONFIG_MISMATCH = 2,
++    CSE_READ_TIMEOUT = 3,
++    CSE_OVERFLOW = 4,
++};
++
++// CS1237 command words (7-bit)
++#define CMD_WRITE_CONFIG 0x65
++#define CMD_READ_CONFIG 0x56
++
++static struct task_wake wake_cs1237;
++
++
++/****************************************************************
++ * Low-level bit-banging
++ ****************************************************************/
++
++#define MIN_PULSE_TIME nsecs_to_ticks(500) // datasheet min pulse ~455ns
++
++static uint32_t
++nsecs_to_ticks(uint32_t ns)
++{
++    return timer_from_us(ns * 1000) / 1000000;
++}
++
++// Pause for a minimum pulse time with irq disabled
++static void
++cs1237_delay_noirq(void)
++{
++    if (CONFIG_MACH_AVR) {
++        // Optimize avr, as calculating time takes longer than needed delay
++        asm("nop\n    nop");
++        return;
++    }
++    uint32_t end = timer_read_time() + MIN_PULSE_TIME;
++    while (timer_is_before(timer_read_time(), end))
++        ;
++}
++
++// Pause for a minimum pulse time
++static void
++cs1237_delay(void)
++{
++    if (CONFIG_MACH_AVR)
++        return;
++    uint32_t end = timer_read_time() + MIN_PULSE_TIME;
++    while (timer_is_before(timer_read_time(), end))
++        irq_poll();
++}
++
++static uint8_t
++cs1237_is_data_ready(struct cs1237_adc *cs1237)
++{
++    return !gpio_in_read(cs1237->dout_in);
++}
++
++static void
++cs1237_clock_pulse(struct cs1237_adc *cs1237)
++{
++    irq_disable();
++    gpio_out_toggle_noirq(cs1237->sclk);
++    cs1237_delay_noirq();
++    gpio_out_toggle_noirq(cs1237->sclk);
++    irq_enable();
++    cs1237_delay();
++}
++
++static uint8_t
++cs1237_read_bit(struct cs1237_adc *cs1237)
++{
++    irq_disable();
++    gpio_out_toggle_noirq(cs1237->sclk);
++    cs1237_delay_noirq();
++    uint8_t bit = gpio_in_read(cs1237->dout_in);
++    gpio_out_toggle_noirq(cs1237->sclk);
++    irq_enable();
++    cs1237_delay();
++    return bit;
++}
++
++static void
++cs1237_write_bit(struct cs1237_adc *cs1237, uint8_t bit)
++{
++    gpio_out_write(cs1237->dout_out, !!bit);
++    cs1237_clock_pulse(cs1237);
++}
++
++// Read one CS1237 ADC frame and move to next conversion.
++// Returns a 24-bit value (in the low bits of the return value).
++static uint32_t
++cs1237_read_frame(struct cs1237_adc *cs1237, uint8_t *status)
++{
++    uint32_t counts = 0;
++    uint8_t i;
++    for (i = 0; i < 24; i++)
++        counts = (counts << 1) | cs1237_read_bit(cs1237);
++    uint8_t update1 = cs1237_read_bit(cs1237);
++    uint8_t update2 = cs1237_read_bit(cs1237);
++    // 27th pulse forces DOUT high until the next conversion is ready
++    cs1237_clock_pulse(cs1237);
++    if (status)
++        *status = update1 | (update2 << 1);
++    return counts;
++}
++
++static void
++cs1237_send_command7(struct cs1237_adc *cs1237, uint8_t cmd)
++{
++    int_fast8_t i;
++    for (i = 6; i >= 0; i--)
++        cs1237_write_bit(cs1237, (cmd >> i) & 0x01);
++}
++
++static int
++cs1237_wait_data_ready(struct cs1237_adc *cs1237, uint32_t timeout_ticks)
++{
++    uint32_t end = timer_read_time() + timeout_ticks;
++    while (timer_is_before(timer_read_time(), end)) {
++        if (cs1237_is_data_ready(cs1237))
++            return 0;
++        irq_poll();
++    }
++    return -1;
++}
++
++static int
++cs1237_write_config(struct cs1237_adc *cs1237, uint8_t config)
++{
++    if (cs1237_wait_data_ready(cs1237, timer_from_us(500000)))
++        return CSE_CONFIG_TIMEOUT;
++    // Enter config sequence by reading the current conversion frame.
++    // This consumes clocks 1..27 (24 data + 2 status + 1 latch-high).
++    cs1237_read_frame(cs1237, NULL);
++    // Datasheet config sequence uses 46 SCLK pulses total:
++    // 28..29 direction-switch clocks, 30..36 command bits,
++    // 37 direction-select clock, 38..45 payload bits, 46 finalize.
++    gpio_out_reset(cs1237->dout_out, 1);
++    // Clocks 28..29
++    cs1237_clock_pulse(cs1237);
++    cs1237_clock_pulse(cs1237);
++    // Clocks 30..36: 7-bit write command
++    cs1237_send_command7(cs1237, CMD_WRITE_CONFIG);
++    // Clock 37: direction-select clock (write path keeps MCU driving)
++    cs1237_clock_pulse(cs1237);
++    // Clocks 38..45: 8-bit payload
++    int_fast8_t i;
++    for (i = 7; i >= 0; i--)
++        cs1237_write_bit(cs1237, (config >> i) & 0x01);
++    // Clock 46 finalizes the transaction
++    cs1237_clock_pulse(cs1237);
++    // Release bus back to input mode for normal conversion reads
++    gpio_in_reset(cs1237->dout_in, 1);
++    return 0;
++}
++
++static int
++cs1237_read_config(struct cs1237_adc *cs1237, uint8_t *config)
++{
++    if (cs1237_wait_data_ready(cs1237, timer_from_us(500000)))
++        return CSE_CONFIG_TIMEOUT;
++    // Clocks 1..27
++    cs1237_read_frame(cs1237, NULL);
++    // Clocks 28..29: direction-switch clocks
++    gpio_out_reset(cs1237->dout_out, 1);
++    cs1237_clock_pulse(cs1237);
++    cs1237_clock_pulse(cs1237);
++    // Clocks 30..36: 7-bit read command
++    cs1237_send_command7(cs1237, CMD_READ_CONFIG);
++    // Clock 37: switch bus direction for readback
++    gpio_in_reset(cs1237->dout_in, 1);
++    cs1237_clock_pulse(cs1237);
++    // Clocks 38..45: 8-bit register payload
++    uint8_t readback = 0;
++    uint8_t i;
++    for (i = 0; i < 8; i++)
++        readback = (readback << 1) | cs1237_read_bit(cs1237);
++    // Clock 46 finalize, with MCU driving high per datasheet
++    gpio_out_reset(cs1237->dout_out, 1);
++    cs1237_clock_pulse(cs1237);
++    gpio_in_reset(cs1237->dout_in, 1);
++    *config = readback;
++    return 0;
++}
++
++static int
++cs1237_configure_chip(struct cs1237_adc *cs1237)
++{
++    // Datasheet power-down exit: keep SCLK low for at least 10us
++    gpio_out_write(cs1237->sclk, 0);
++    uint32_t wake_end = timer_read_time() + timer_from_us(20);
++    while (timer_is_before(timer_read_time(), wake_end))
++        irq_poll();
++    gpio_in_reset(cs1237->dout_in, 1);
++    int ret = cs1237_write_config(cs1237, cs1237->config);
++    if (ret)
++        return ret;
++    uint8_t readback = 0;
++    ret = cs1237_read_config(cs1237, &readback);
++    if (ret)
++        return ret;
++    if ((readback & 0x7f) != (cs1237->config & 0x7f))
++        return CSE_CONFIG_MISMATCH;
++    return 0;
++}
++
++
++/****************************************************************
++ * CS1237 Sensor Support
++ ****************************************************************/
++
++// Event handler that wakes wake_cs1237() periodically
++static uint_fast8_t
++cs1237_event(struct timer *timer)
++{
++    struct cs1237_adc *cs1237 = container_of(timer, struct cs1237_adc, timer);
++    uint32_t rest_ticks = cs1237->rest_ticks;
++    uint8_t flags = cs1237->flags;
++    if (flags & CS_PENDING) {
++        cs1237->sb.possible_overflows++;
++        cs1237->flags = CS_PENDING | CS_OVERFLOW;
++        rest_ticks *= 4;
++    } else if (cs1237_is_data_ready(cs1237)) {
++        // New sample pending
++        cs1237->flags = CS_PENDING;
++        sched_wake_task(&wake_cs1237);
++        rest_ticks *= 8;
++    }
++    cs1237->timer.waketime += rest_ticks;
++    return SF_RESCHEDULE;
++}
++
++static void
++add_sample(struct cs1237_adc *cs1237, uint8_t oid, uint32_t counts,
++           uint8_t force_flush)
++{
++    cs1237->sb.data[cs1237->sb.data_count] = counts;
++    cs1237->sb.data[cs1237->sb.data_count + 1] = counts >> 8;
++    cs1237->sb.data[cs1237->sb.data_count + 2] = counts >> 16;
++    cs1237->sb.data[cs1237->sb.data_count + 3] = counts >> 24;
++    cs1237->sb.data_count += BYTES_PER_SAMPLE;
++    if (cs1237->sb.data_count + BYTES_PER_SAMPLE > ARRAY_SIZE(cs1237->sb.data)
++        || force_flush)
++        sensor_bulk_report(&cs1237->sb, oid);
++}
++
++// CS1237 ADC query
++static void
++cs1237_read_adc(struct cs1237_adc *cs1237, uint8_t oid)
++{
++    // Clear pending flag (and note if an overflow occurred)
++    irq_disable();
++    uint8_t flags = cs1237->flags;
++    cs1237->flags = 0;
++    irq_enable();
++
++    uint32_t counts = 0;
++    if (flags & CS_OVERFLOW) {
++        cs1237->last_error = SAMPLE_ERROR_READ_TOO_LONG;
++        cs1237->sensor_error = CSE_OVERFLOW;
++    } else if (cs1237->last_error == 0) {
++        // Read from sensor (data ready should already be low)
++        if (!cs1237_is_data_ready(cs1237)) {
++            cs1237->last_error = SAMPLE_ERROR_TIMEOUT;
++            cs1237->sensor_error = CSE_READ_TIMEOUT;
++        } else {
++            uint8_t status_bits = 0;
++            counts = cs1237_read_frame(cs1237, &status_bits);
++            (void)status_bits;
++            // Extend 24-bit 2's complement to 32 bits
++            if (counts & 0x800000)
++                counts |= 0xFF000000;
++        }
++    }
++
++    if (cs1237->last_error != 0) {
++        counts = cs1237->last_error;
++        trigger_analog_note_error(cs1237->ta, cs1237->sensor_error);
++    } else {
++        cs1237->last_sample = (int32_t)counts;
++        trigger_analog_update(cs1237->ta, counts);
++    }
++    add_sample(cs1237, oid, counts, 0);
++}
++
++// Create a cs1237 sensor
++void
++command_config_cs1237(uint32_t *args)
++{
++    struct cs1237_adc *cs1237 = oid_alloc(args[0]
++                , command_config_cs1237, sizeof(*cs1237));
++    cs1237->timer.func = cs1237_event;
++    cs1237->config = args[1] & 0x7f;
++    cs1237->dout_out = gpio_out_setup(args[2], 1);
++    cs1237->dout_in = gpio_in_setup(args[2], 1);
++    cs1237->sclk = gpio_out_setup(args[3], 1); // high -> power down
++    cs1237->last_sample = 0;
++}
++DECL_COMMAND(command_config_cs1237, "config_cs1237 oid=%c config=%c"
++             " dout_pin=%u sclk_pin=%u");
++
++void
++cs1237_attach_trigger_analog(uint32_t *args)
++{
++    struct cs1237_adc *cs1237 = oid_lookup(args[0], command_config_cs1237);
++    cs1237->ta = trigger_analog_oid_lookup(args[1]);
++}
++#if CONFIG_WANT_TRIGGER_ANALOG
++DECL_COMMAND(cs1237_attach_trigger_analog, "cs1237_attach_trigger_analog"
++             " oid=%c trigger_analog_oid=%c");
++#endif
++
++// start/stop capturing ADC data
++void
++command_query_cs1237(uint32_t *args)
++{
++    struct cs1237_adc *cs1237 = oid_lookup(args[0], command_config_cs1237);
++    sched_del_timer(&cs1237->timer);
++    cs1237->flags = 0;
++    cs1237->last_error = 0;
++    cs1237->sensor_error = 0;
++    cs1237->rest_ticks = args[1];
++    if (!cs1237->rest_ticks) {
++        // End measurements - SCLK high for >100us enters power down
++        gpio_out_write(cs1237->sclk, 1);
++        gpio_in_reset(cs1237->dout_in, 1);
++        return;
++    }
++    // Start new measurements
++    sensor_bulk_reset(&cs1237->sb);
++    int ret = cs1237_configure_chip(cs1237);
++    if (ret) {
++        cs1237->last_error = SAMPLE_ERROR_CONFIG;
++        cs1237->sensor_error = ret;
++        trigger_analog_note_error(cs1237->ta, cs1237->sensor_error);
++    }
++    irq_disable();
++    cs1237->timer.waketime = timer_read_time() + cs1237->rest_ticks;
++    sched_add_timer(&cs1237->timer);
++    irq_enable();
++}
++DECL_COMMAND(command_query_cs1237, "query_cs1237 oid=%c rest_ticks=%u");
++
++void
++command_query_cs1237_status(const uint32_t *args)
++{
++    uint8_t oid = args[0];
++    struct cs1237_adc *cs1237 = oid_lookup(oid, command_config_cs1237);
++    irq_disable();
++    const uint32_t start_t = timer_read_time();
++    uint8_t is_data_ready = cs1237_is_data_ready(cs1237);
++    irq_enable();
++    uint8_t pending_bytes = is_data_ready ? BYTES_PER_SAMPLE : 0;
++    sensor_bulk_status(&cs1237->sb, oid, start_t, 0, pending_bytes);
++}
++DECL_COMMAND(command_query_cs1237_status, "query_cs1237_status oid=%c");
++
++// Background task that performs measurements
++void
++cs1237_capture_task(void)
++{
++    if (!sched_check_wake(&wake_cs1237))
++        return;
++    uint8_t oid;
++    struct cs1237_adc *cs1237;
++    foreach_oid(oid, cs1237, command_config_cs1237) {
++        if (cs1237->flags)
++            cs1237_read_adc(cs1237, oid);
++    }
++}
++DECL_TASK(cs1237_capture_task);
+diff --git a/test/klippy/load_cell.cfg b/test/klippy/load_cell.cfg
+index c7f66325..705d85cf 100644
+--- a/test/klippy/load_cell.cfg
++++ b/test/klippy/load_cell.cfg
+@@ -92,12 +92,20 @@ sensor_type: hx717
+ sclk_pin: PA7
+ dout_pin: PJ0
+
++[load_cell my_cs1237]
++sensor_type: cs1237
++sclk_pin: PH0
++dout_pin: PH1
++sample_rate: 1280
++gain: 128
++channel: A
++
+ [load_cell_probe]
+ z_offset: 0
+-sensor_type: ads1220
++sensor_type: cs1237
+ speed: 10.0
+-cs_pin: PJ2
+-data_ready_pin: PJ3
++sclk_pin: PJ2
++dout_pin: PJ3
+ counts_per_gram: 100
+ reference_tare_counts: 1000
+ drift_filter_cutoff_frequency: 0.8

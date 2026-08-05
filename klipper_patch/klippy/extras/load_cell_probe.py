@@ -5,7 +5,11 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math
 import mcu
-from . import probe, trigger_analog, load_cell, hx71x, cs1237, ads1220
+from . import hx71x
+from . import cs1237
+from . import ads1220
+from . import ads131m0x
+from . import probe, manual_probe, trigger_analog, load_cell
 
 np = None  # delay NumPy import until configuration time
 
@@ -160,9 +164,14 @@ class ContinuousTareFilter:
 
     # create a filter design from the parameters
     def design_filter(self, error_func):
-        return trigger_analog.DigitalFilter(self.sps, error_func, self.drift,
-            self.drift_delay, self.buzz, self.buzz_delay, self.notches,
-            self.notch_quality)
+        df = trigger_analog.DigitalFilter(self.sps, error_func)
+        if self.drift:
+            df.add_highpass(self.drift, self.drift_delay)
+        if self.buzz:
+            df.add_lowpass(self.buzz, self.buzz_delay)
+        for notch in self.notches:
+            df.add_notch(notch, self.notch_quality)
+        return df
 
 
 # Combine ContinuousTareFilter and SosFilter into an easy-to-use class
@@ -237,9 +246,9 @@ class LoadCellProbeConfigHelper:
         self._tare_time_param = floatParamHelper(config, 'tare_time',
             default=4. / 60., minval=0.01, maxval=1.0)
         # triggering options
-        self._trigger_force_param = intParamHelper(config, 'trigger_force',
+        self._trigger_force_param = floatParamHelper(config, 'trigger_force',
             default=75, minval=10, maxval=250)
-        self._force_safety_limit_param = intParamHelper(config,
+        self._force_safety_limit_param = floatParamHelper(config,
             'force_safety_limit', minval=100, maxval=5000, default=2000)
 
     def get_tare_samples(self, gcmd=None):
@@ -323,11 +332,10 @@ class LoadCellProbingMove:
         # update internal tare value
         gpc = self._config_helper.get_grams_per_count() * FRAC_GRAMS_CONV
         sos_filter = self._mcu_trigger_analog.get_sos_filter()
-        Q17_14_FRAC_BITS = 14
-        sos_filter.set_offset_scale(int(-tare_counts), gpc, Q17_14_FRAC_BITS)
+        sos_filter.set_offset_scale(int(-tare_counts), gpc)
         # update trigger
         trigger_val = self._config_helper.get_trigger_force_grams(gcmd)
-        trigger_frac_grams = trigger_val * FRAC_GRAMS_CONV
+        trigger_frac_grams = int(trigger_val * FRAC_GRAMS_CONV)
         self._mcu_trigger_analog.set_trigger("abs_ge", trigger_frac_grams)
 
     # Probe towards z_min until the trigger_analog on the MCU triggers
@@ -426,7 +434,8 @@ class TapSession:
     # probe until a single good sample is returned or retries are exhausted
     def run_probe(self, gcmd):
         epos, is_good = self._tapping_move.run_tap(gcmd)
-        res = self._probe_offsets.create_probe_result(epos)
+        offsets = self._probe_offsets.get_offsets()
+        res = manual_probe.create_probe_result(epos, offsets)
         self._results.append(res)
 
     def pull_probed_results(self):
@@ -479,6 +488,7 @@ class LoadCellPrinterProbe:
         sensors.update(hx71x.HX71X_SENSOR_TYPES)
         sensors.update(cs1237.CS1237_SENSOR_TYPE)
         sensors.update(ads1220.ADS1220_SENSOR_TYPE)
+        sensors.update(ads131m0x.ADS131M0X_SENSOR_TYPES)
         sensor_class = config.getchoice('sensor_type', sensors)
         sensor = sensor_class(config)
         self._load_cell = load_cell.LoadCell(config, sensor)
@@ -502,11 +512,11 @@ class LoadCellPrinterProbe:
             config_helper)
         tap_session = TapSession(config, self._tapping_move,
                                  self._probe_offsets, self._param_helper)
-        self._probe_session = probe.ProbeSessionHelper(config,
+        self._probe_session = probe.SampleAveragingHelper(config,
             self._param_helper, tap_session.start_probe_session)
         # printer integration
         LoadCellProbeCommands(config, load_cell_probing_move)
-        probe.ProbeVirtualEndstopDeprecation(config)
+        probe.HomingViaProbeHelper(config, self.get_offsets()[2])
         self._printer.add_object('probe', self)
 
     def get_probe_params(self, gcmd=None):

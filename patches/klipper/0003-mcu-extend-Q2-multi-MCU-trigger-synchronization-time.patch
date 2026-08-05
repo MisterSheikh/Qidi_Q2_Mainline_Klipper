@@ -1,0 +1,22 @@
+From 9a6a92032fb0a5c1e72e8281b1fe31a85f1699bf Mon Sep 17 00:00:00 2001
+From: Ahmed Sheikh <ahmed.ali.sheikh1998@gmail.com>
+Date: Sun, 26 Jul 2026 10:45:20 -0400
+Subject: [PATCH 3/4] mcu: extend Q2 multi-MCU trigger synchronization timeout
+
+---
+ klippy/mcu.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/klippy/mcu.py b/klippy/mcu.py
+index 5f980d5e..617b8d85 100644
+--- a/klippy/mcu.py
++++ b/klippy/mcu.py
+@@ -276,7 +276,7 @@ class MCU_trsync:
+             s.note_homing_end()
+         return params['trigger_reason']
+
+-TRSYNC_TIMEOUT = 0.025
++TRSYNC_TIMEOUT = 0.050
+ TRSYNC_SINGLE_MCU_TIMEOUT = 0.250
+
+ class TriggerDispatch:

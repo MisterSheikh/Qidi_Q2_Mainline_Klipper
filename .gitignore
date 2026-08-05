@@ -1,0 +1,12 @@
+# Disposable upstream/reference clones
+/klipper/
+/katapult/
+/reference/
+/analysis/
+
+# Local stock configuration material
+/qidi_q2_stock_config/
+
+# Python validation output
+__pycache__/
+*.pyc

@@ -348,8 +348,10 @@ cs1237_attach_trigger_analog(uint32_t *args)
     struct cs1237_adc *cs1237 = oid_lookup(args[0], command_config_cs1237);
     cs1237->ta = trigger_analog_oid_lookup(args[1]);
 }
+#if CONFIG_WANT_TRIGGER_ANALOG
 DECL_COMMAND(cs1237_attach_trigger_analog, "cs1237_attach_trigger_analog"
              " oid=%c trigger_analog_oid=%c");
+#endif
 
 // start/stop capturing ADC data
 void

@@ -1,0 +1,418 @@
+From c1929a76c878afae4867061d1f3188e1dd6ecdff Mon Sep 17 00:00:00 2001
+From: Ahmed Sheikh <ahmed.ali.sheikh1998@gmail.com>
+Date: Sun, 26 Jul 2026 10:44:51 -0400
+Subject: [PATCH 1/4] stm32: add GD32F425 USB workaround
+
+---
+ src/generic/usb_cdc_ep.h |  14 ++-
+ src/stm32/Kconfig        |   9 ++
+ src/stm32/usbotg.c       | 225 ++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 243 insertions(+), 5 deletions(-)
+
+diff --git a/src/generic/usb_cdc_ep.h b/src/generic/usb_cdc_ep.h
+index 3b0e6beb..3de6da2c 100644
+--- a/src/generic/usb_cdc_ep.h
++++ b/src/generic/usb_cdc_ep.h
+@@ -1,16 +1,28 @@
+ #ifndef __GENERIC_USB_CDC_EP_H
+ #define __GENERIC_USB_CDC_EP_H
+
++#include "autoconf.h" // CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++
+ // Default USB endpoint ids
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++enum {
++    // Match the GD32F4 CDC-ACM reference layout (IN1, CMD IN2, OUT3).
++    USB_CDC_EP_BULK_IN = 1,
++    USB_CDC_EP_BULK_OUT = 3,
++    USB_CDC_EP_ACM = 2,
++};
++#else
+ enum {
+     USB_CDC_EP_BULK_IN = 1,
+     USB_CDC_EP_BULK_OUT = 2,
+     USB_CDC_EP_ACM = 3,
+ };
++#endif
+
+ // Default endpoint sizes
+ enum {
+-    USB_CDC_EP0_SIZE = 16,
++    // Use 64-byte EP0 on GD32 workaround builds to match common FS behavior.
++    USB_CDC_EP0_SIZE = CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND ? 64 : 16,
+     USB_CDC_EP_ACM_SIZE = 8,
+     USB_CDC_EP_BULK_OUT_SIZE = 64,
+     USB_CDC_EP_BULK_IN_SIZE = 64,
+diff --git a/src/stm32/Kconfig b/src/stm32/Kconfig
+index da1b4744..2b3768ec 100644
+--- a/src/stm32/Kconfig
++++ b/src/stm32/Kconfig
+@@ -383,6 +383,15 @@ config STM32F0_TRIM
+         Default is 16 (use factory default). Each increment increases
+         the clock rate by ~240KHz.
+
++config STM32F4_GD32_USB_INIT_WORKAROUND
++    bool "GD32F4 USB init workaround" if LOW_LEVEL_OPTIONS
++    depends on MACH_STM32F4x5 && USBSERIAL
++    default n
++    help
++        Enable a USB initialization workaround for GD32F4 clones
++        (including GD32F425) that may fail to enumerate after
++        bootloader handoff.
++
+
+ ######################################################################
+ # Communication inteface
+diff --git a/src/stm32/usbotg.c b/src/stm32/usbotg.c
+index 6e308369..fd5bbb02 100644
+--- a/src/stm32/usbotg.c
++++ b/src/stm32/usbotg.c
+@@ -11,6 +11,7 @@
+ #include "board/usb_cdc.h" // usb_notify_ep0
+ #include "board/usb_cdc_ep.h" // USB_CDC_EP_BULK_IN
+ #include "command.h" // DECL_CONSTANT_STR
++#include "generic/armcm_timer.h" // udelay
+ #include "internal.h" // GPIO
+ #include "sched.h" // DECL_INIT
+
+@@ -67,6 +68,65 @@ usb_irq_enable(void)
+ #define EPOUT(EP) ((USB_OTG_OUTEndpointTypeDef*)                        \
+                    (USB_PERIPH_BASE + USB_OTG_OUT_ENDPOINT_BASE + ((EP) << 5)))
+
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++#define USB_PWRCLKCTL (*(volatile uint32_t *)(USB_PERIPH_BASE + 0x0E00))
++#define USB_PWRCLKCTL_SHCLK (1 << 1)
++#define USB_PWRCLKCTL_SUCLK (1 << 0)
++
++static void
++usb_core_soft_reset(void)
++{
++    while (!(OTG->GRSTCTL & USB_OTG_GRSTCTL_AHBIDL))
++        ;
++    OTG->GRSTCTL |= USB_OTG_GRSTCTL_CSRST;
++    while (OTG->GRSTCTL & USB_OTG_GRSTCTL_CSRST)
++        ;
++    udelay(3);
++}
++
++static void
++usb_core_runtime_reset(void)
++{
++    // Flush all TX FIFOs then RX FIFO after bootloader handoff.
++    OTG->GRSTCTL = (USB_OTG_GRSTCTL_TXFFLSH
++                    | (0x10 << USB_OTG_GRSTCTL_TXFNUM_Pos));
++    while (OTG->GRSTCTL & USB_OTG_GRSTCTL_TXFFLSH)
++        ;
++    udelay(3);
++    OTG->GRSTCTL = USB_OTG_GRSTCTL_RXFFLSH;
++    while (OTG->GRSTCTL & USB_OTG_GRSTCTL_RXFFLSH)
++        ;
++    udelay(3);
++
++    // Clear endpoint runtime state that may persist from the bootloader.
++    int i;
++    for (i = 0; i < 4; i++) {
++        USB_OTG_INEndpointTypeDef *ei = EPIN(i);
++        USB_OTG_OUTEndpointTypeDef *eo = EPOUT(i);
++
++        if (ei->DIEPCTL & USB_OTG_DIEPCTL_EPENA)
++            ei->DIEPCTL = USB_OTG_DIEPCTL_EPDIS | USB_OTG_DIEPCTL_SNAK;
++        else
++            ei->DIEPCTL = 0;
++        ei->DIEPTSIZ = 0;
++        ei->DIEPINT = 0xFFFFFFFF;
++
++        if (eo->DOEPCTL & USB_OTG_DOEPCTL_EPENA)
++            eo->DOEPCTL = USB_OTG_DOEPCTL_EPDIS | USB_OTG_DOEPCTL_SNAK;
++        else
++            eo->DOEPCTL = 0;
++        eo->DOEPTSIZ = 0;
++        eo->DOEPINT = 0xFFFFFFFF;
++    }
++
++    OTGD->DIEPEMPMSK = 0;
++    OTGD->DAINTMSK = 0;
++    OTGD->DAINT = 0xFFFFFFFF;
++    OTG->GOTGINT = 0xFFFFFFFF;
++    OTG->GINTSTS = 0xBFFFFFFF;
++}
++#endif
++
+ // Setup the USB fifos
+ static void
+ fifo_configure(void)
+@@ -169,11 +229,52 @@ enable_rx_endpoint(uint32_t ep)
+     USB_OTG_OUTEndpointTypeDef *epo = EPOUT(ep);
+     uint32_t ctl = epo->DOEPCTL;
+     if (!(ctl & USB_OTG_DOEPCTL_EPENA) || ctl & USB_OTG_DOEPCTL_NAKSTS) {
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++        if (ep == 0) {
++            // Keep EP0 setup buffering enabled on GD32 after each
++            // control phase.
++            epo->DOEPTSIZ = (64 | (3 << USB_OTG_DOEPTSIZ_STUPCNT_Pos)
++                             | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
++        } else {
++            epo->DOEPTSIZ = 64 | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos);
++        }
++#else
+         epo->DOEPTSIZ = 64 | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos);
++#endif
+         epo->DOEPCTL = ctl | USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
+     }
+ }
+
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++// Stage one bulk-OUT packet in irq context so host->MCU writes don't stall.
++static uint8_t gd32_bulk_out_buf[USB_CDC_EP_BULK_OUT_SIZE];
++static volatile uint8_t gd32_bulk_out_len, gd32_bulk_out_ready;
++
++static int
++gd32_stage_bulk_out_packet(void)
++{
++    uint32_t grx = OTG->GRXSTSR;
++    uint32_t ep = grx & USB_OTG_GRXSTSP_EPNUM_Msk;
++    if (ep != USB_CDC_EP_BULK_OUT)
++        return 0;
++    uint32_t pktsts = ((grx & USB_OTG_GRXSTSP_PKTSTS_Msk)
++                       >> USB_OTG_GRXSTSP_PKTSTS_Pos);
++    if (pktsts != 2)
++        return 0;
++    if (!gd32_bulk_out_ready) {
++        gd32_bulk_out_len = fifo_read_packet(gd32_bulk_out_buf
++                                             , sizeof(gd32_bulk_out_buf));
++        gd32_bulk_out_ready = 1;
++    } else {
++        // Drop packet if userspace hasn't consumed prior staged payload yet.
++        fifo_read_packet(NULL, 0);
++    }
++    enable_rx_endpoint(USB_CDC_EP_BULK_OUT);
++    usb_notify_bulk_out();
++    return 1;
++}
++#endif
++
+ // Inspect the next packet on the rx queue
+ static uint32_t
+ peek_rx_queue(uint32_t ep)
+@@ -213,6 +314,19 @@ int_fast8_t
+ usb_read_bulk_out(void *data, uint_fast8_t max_len)
+ {
+     usb_irq_disable();
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    if (gd32_bulk_out_ready) {
++        uint_fast8_t len = gd32_bulk_out_len;
++        if (len > max_len)
++            len = max_len;
++        memcpy(data, gd32_bulk_out_buf, len);
++        gd32_bulk_out_ready = 0;
++        gd32_bulk_out_len = 0;
++        OTG->GINTMSK |= USB_OTG_GINTMSK_RXFLVLM;
++        usb_irq_enable();
++        return len;
++    }
++#endif
+     uint32_t grx = peek_rx_queue(USB_CDC_EP_BULK_OUT);
+     if (!grx) {
+         // Wait for packet
+@@ -222,6 +336,10 @@ usb_read_bulk_out(void *data, uint_fast8_t max_len)
+     }
+     int_fast8_t ret = fifo_read_packet(data, max_len);
+     enable_rx_endpoint(USB_CDC_EP_BULK_OUT);
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    // Keep RX notifications flowing on GD32 after the first bulk packet.
++    OTG->GINTMSK |= USB_OTG_GINTMSK_RXFLVLM;
++#endif
+     usb_irq_enable();
+     return ret;
+ }
+@@ -285,6 +403,9 @@ usb_read_ep0(void *data, uint_fast8_t max_len)
+     }
+     int_fast8_t ret = fifo_read_packet(data, max_len);
+     enable_rx_endpoint(0);
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    OTG->GINTMSK |= USB_OTG_GINTMSK_RXFLVLM;
++#endif
+     usb_irq_enable();
+     return ret;
+ }
+@@ -326,6 +447,9 @@ usb_read_ep0_setup(void *data, uint_fast8_t max_len)
+     }
+     enable_rx_endpoint(0);
+     EPOUT(0)->DOEPINT = USB_OTG_DOEPINT_STUP;
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    OTG->GINTMSK |= USB_OTG_GINTMSK_RXFLVLM;
++#endif
+     usb_irq_enable();
+     // Return previously read setup packet
+     memcpy(data, setup_buf, max_len);
+@@ -376,6 +500,10 @@ void
+ usb_set_configure(void)
+ {
+     usb_irq_disable();
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    gd32_bulk_out_ready = 0;
++    gd32_bulk_out_len = 0;
++#endif
+     // Configure and enable USB_CDC_EP_ACM
+     USB_OTG_INEndpointTypeDef *epi = EPIN(USB_CDC_EP_ACM);
+     epi->DIEPTSIZ = (USB_CDC_EP_ACM_SIZE
+@@ -425,6 +553,9 @@ OTG_FS_IRQHandler(void)
+ {
+     uint32_t sts = OTG->GINTSTS;
+     if (sts & USB_OTG_GINTSTS_RXFLVL) {
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++        if (!gd32_stage_bulk_out_packet()) {
++#endif
+         // Received data - disable irq and notify endpoint
+         OTG->GINTMSK &= ~USB_OTG_GINTMSK_RXFLVLM;
+         uint32_t grx = OTG->GRXSTSR, ep = grx & USB_OTG_GRXSTSP_EPNUM_Msk;
+@@ -432,11 +563,15 @@ OTG_FS_IRQHandler(void)
+             usb_notify_ep0();
+         else
+             usb_notify_bulk_out();
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++        }
++#endif
+     }
+     if (sts & USB_OTG_GINTSTS_IEPINT) {
+         // Can transmit data - disable irq and notify endpoint
+-        uint32_t daint = OTGD->DAINT, msk = OTGD->DAINTMSK, pend = daint & msk;
+-        OTGD->DAINTMSK = msk & ~daint;
++        uint32_t daint = OTGD->DAINT, msk = OTGD->DAINTMSK;
++        uint32_t in_mask = msk & 0x0000FFFF, pend = daint & in_mask;
++        OTGD->DAINTMSK = (msk & ~pend);
+         if (pend & (1 << 0))
+             usb_notify_ep0();
+         if (pend & (1 << USB_CDC_EP_BULK_IN)) {
+@@ -449,6 +584,36 @@ OTG_FS_IRQHandler(void)
+             }
+         }
+     }
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    if (sts & USB_OTG_GINTSTS_OEPINT) {
++        uint32_t daint = OTGD->DAINT;
++        if (daint & (1 << (16 + USB_CDC_EP_BULK_OUT))) {
++            EPOUT(USB_CDC_EP_BULK_OUT)->DOEPINT = USB_OTG_DOEPINT_XFRC;
++            enable_rx_endpoint(USB_CDC_EP_BULK_OUT);
++            usb_notify_bulk_out();
++        }
++        if (daint & (1 << 16)) {
++            EPOUT(0)->DOEPINT = USB_OTG_DOEPINT_STUP | USB_OTG_DOEPINT_XFRC;
++            usb_notify_ep0();
++        }
++    }
++    if (sts & USB_OTG_GINTSTS_USBRST) {
++        // Ack reset; enumeration completion handler rearms EP0 OUT.
++        OTG->GINTSTS = USB_OTG_GINTSTS_USBRST;
++    }
++    if (sts & USB_OTG_GINTSTS_ENUMDNE) {
++        // Ack enumeration done and reprogram turnaround time.
++        OTG->GINTSTS = USB_OTG_GINTSTS_ENUMDNE;
++        OTG->GUSBCFG = ((OTG->GUSBCFG & ~USB_OTG_GUSBCFG_TRDT)
++                        | (6 << USB_OTG_GUSBCFG_TRDT_Pos));
++        // Clear global IN/OUT NAK and rearm EP0 OUT to accept SETUP.
++        OTGD->DCTL = USB_OTG_DCTL_CGINAK;
++        OTGD->DCTL = USB_OTG_DCTL_CGONAK;
++        EPOUT(0)->DOEPTSIZ = (8 | (3 << USB_OTG_DOEPTSIZ_STUPCNT_Pos)
++                              | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
++        EPOUT(0)->DOEPCTL |= USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_CNAK;
++    }
++#endif
+ }
+
+ // Initialize the usb controller
+@@ -464,15 +629,40 @@ usb_init(void)
+ #else
+     RCC->AHB2ENR |= RCC_AHB2ENR_OTGFSEN;
+ #endif
++
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    // Restart GD32 USB PHY clock domain and reset the core state.
++    USB_PWRCLKCTL &= ~(USB_PWRCLKCTL_SHCLK | USB_PWRCLKCTL_SUCLK);
++    USB_PWRCLKCTL = 0;
++    usb_core_soft_reset();
++    *(volatile uint32_t *)(USB_PERIPH_BASE + USB_OTG_PCGCCTL_BASE) = 0;
++#else
+     while (!(OTG->GRSTCTL & USB_OTG_GRSTCTL_AHBIDL))
+         ;
++#endif
+
+     // Configure USB in full-speed device mode
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    // Preserve reserved bits for GD32 USBFS GUSBCS compatibility.
++    OTG->GUSBCFG = ((OTG->GUSBCFG
++                     & ~(USB_OTG_GUSBCFG_FDMOD | USB_OTG_GUSBCFG_FHMOD
++                         | USB_OTG_GUSBCFG_TRDT))
++                    | USB_OTG_GUSBCFG_FDMOD
++                    | (6 << USB_OTG_GUSBCFG_TRDT_Pos));
++    while (OTG->GINTSTS & USB_OTG_GINTSTS_CMOD)
++        ;
++#else
+     OTG->GUSBCFG = (USB_OTG_GUSBCFG_FDMOD | USB_OTG_GUSBCFG_PHYSEL
+                     | (6 << USB_OTG_GUSBCFG_TRDT_Pos));
++#endif
+     OTGD->DCFG |= (3 << USB_OTG_DCFG_DSPD_Pos);
+ #if CONFIG_MACH_STM32F446 || CONFIG_MACH_STM32H7 || CONFIG_MACH_STM32F7
+     OTG->GOTGCTL = USB_OTG_GOTGCTL_BVALOEN | USB_OTG_GOTGCTL_BVALOVAL;
++#elif CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    // Use explicit GD32 session/power bits.
++    OTG->GCCFG = (USB_OTG_GCCFG_PWRDWN | USB_OTG_GCCFG_NOVBUSSENS
++                  | USB_OTG_GCCFG_VBUSASEN | USB_OTG_GCCFG_VBUSBSEN);
++    udelay(20000);
+ #else
+     OTG->GCCFG |= USB_OTG_GCCFG_NOVBUSSENS;
+ #endif
+@@ -483,24 +673,51 @@ usb_init(void)
+
+     // Setup USB packet memory
+     fifo_configure();
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    usb_core_runtime_reset();
++#endif
+
+     // Configure and enable ep0
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    // EP0 MPS encoding: 0 => 64 bytes.
++    uint32_t mpsize_ep0 = 0;
++#else
+     uint32_t mpsize_ep0 = 2;
++#endif
+     USB_OTG_INEndpointTypeDef *epi = EPIN(0);
+     USB_OTG_OUTEndpointTypeDef *epo = EPOUT(0);
+     epi->DIEPCTL = mpsize_ep0 | USB_OTG_DIEPCTL_SNAK;
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    epo->DOEPTSIZ = (64 | (3 << USB_OTG_DOEPTSIZ_STUPCNT_Pos)
++                     | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
++#else
+     epo->DOEPTSIZ = (64 | (1 << USB_OTG_DOEPTSIZ_STUPCNT_Pos)
+                      | (1 << USB_OTG_DOEPTSIZ_PKTCNT_Pos));
++#endif
+     epo->DOEPCTL = mpsize_ep0 | USB_OTG_DOEPCTL_EPENA | USB_OTG_DOEPCTL_SNAK;
+
+     // Enable interrupts
+     OTGD->DIEPMSK = USB_OTG_DIEPMSK_XFRCM;
+-    OTG->GINTMSK = USB_OTG_GINTMSK_RXFLVLM | USB_OTG_GINTMSK_IEPINT;
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    OTGD->DOEPMSK = USB_OTG_DOEPMSK_XFRCM | USB_OTG_DOEPMSK_STUPM;
++    OTGD->DAINTMSK = (1 << 16) | (1 << (16 + USB_CDC_EP_BULK_OUT));
++#endif
++    OTG->GINTMSK = (USB_OTG_GINTMSK_RXFLVLM | USB_OTG_GINTMSK_IEPINT
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++                    | USB_OTG_GINTMSK_OEPINT | USB_OTG_GINTMSK_USBRST
++                    | USB_OTG_GINTMSK_ENUMDNEM
++#endif
++                    );
+     OTG->GAHBCFG = USB_OTG_GAHBCFG_GINT;
+     armcm_enable_irq(OTG_FS_IRQHandler, OTG_IRQn, 1);
+
+-    // Enable USB
++    // Enable USB transceiver and connect.
+     OTG->GCCFG |= USB_OTG_GCCFG_PWRDWN;
+     OTGD->DCTL = 0;
++#if CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND
++    // Ensure no global NAK state survives bootloader handoff.
++    OTGD->DCTL = USB_OTG_DCTL_CGINAK;
++    OTGD->DCTL = USB_OTG_DCTL_CGONAK;
++#endif
+ }
+ DECL_INIT(usb_init);
