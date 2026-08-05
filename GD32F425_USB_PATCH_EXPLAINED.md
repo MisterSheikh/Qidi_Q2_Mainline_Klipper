@@ -4,40 +4,19 @@ This document explains the GD32 USB bring-up work as it exists in this repositor
 
 ## 1) Where this patch lives
 
-Canonical patch files:
+Patch files:
 
-- Klipper runtime patch: `patches/klipper/0001-q2-mainboard-usb-and-cs1237.patch`
+- Klipper runtime patch:
+  `patches/klipper/0001-stm32-add-GD32F425-USB-workaround.patch`
 - Katapult bootloader patch: `patches/katapult/0001-q2-mainboard-usb.patch`
 
-The Klipper patch file ships two logical feature sets together:
+## 2) File ownership
 
-1. GD32 USB stability/compatibility changes
-2. CS1237 load-cell support
-
-This document covers only (1), and calls out file ownership so there is no ambiguity.
-
-## 2) File ownership inside the combined Klipper patch
-
-GD32 USB portion (Klipper):
+The Klipper USB patch changes:
 
 - `src/stm32/usbotg.c`
 - `src/stm32/Kconfig`
 - `src/generic/usb_cdc_ep.h`
-
-CS1237 portion (separate logical patch in same file):
-
-- `src/sensor_cs1237.c`
-- `src/Kconfig`
-- `src/Makefile`
-- `klippy/extras/cs1237.py`
-- `klippy/extras/load_cell.py`
-- `klippy/extras/load_cell_probe.py`
-
-Additional local changes present in the combined Klipper patch:
-
-- `klippy/mcu.py`
-
-That `klippy/mcu.py` change is not part of the core GD32 USB mechanism explained below.
 
 ## 3) Common USB files across Klipper and Katapult
 
@@ -51,7 +30,8 @@ Katapult also changes:
 
 - `src/generic/usb_cdc.h`
 
-This is intentional: Q2 needs stable USB behavior in both bootloader stage (Katapult) and runtime stage (Klipper).
+Q2 needs stable USB behavior in both the bootloader stage (Katapult) and the
+runtime stage (Klipper).
 
 ## 4) Hardware issue this patch addresses
 
@@ -192,12 +172,11 @@ Klipper must do the same for normal runtime operation.
 
 If only one side is fixed, users still encounter breakage at either flashing or runtime stages.
 
-## 10) Relationship to CS1237 in the combined Klipper patch
+## 10) Relationship to CS1237
 
 The CS1237 feature work is separate and does not implement the USB fix.
 
-Key clarification:
-
-- `src/Kconfig` and `src/Makefile` changes in the combined patch are CS1237 integration work, not GD32 USB bring-up.
+The `src/Kconfig` and `src/Makefile` changes in the `0002` patch are CS1237
+integration work, not GD32 USB bring-up.
 
 For CS1237 details, see [CS1237_PATCH_EXPLAINED.md](CS1237_PATCH_EXPLAINED.md).

@@ -6,18 +6,17 @@ This document explains the CS1237 integration in the current repository patchset
 
 CS1237 changes are inside:
 
-- `patches/klipper/0001-q2-mainboard-usb-and-cs1237.patch`
+- `patches/klipper/0002-load_cell-add-CS1237-ADC-support.patch`
 
-That file bundles two logical feature sets:
+Supported fallback revisions are listed in
+[docs/KNOWN_GOOD_MATRIX.md](docs/KNOWN_GOOD_MATRIX.md).
 
-1. GD32 USB bring-up fixes
-2. CS1237 sensor integration
+The GD32F425 USB workaround and Q2 communication timeout are separate patches
+in the numbered Klipper series.
 
-This document covers only (2), and identifies file ownership so it is clear what belongs to each logical patch.
+## 2) File ownership
 
-## 2) File ownership inside the combined Klipper patch
-
-CS1237 portion:
+The CS1237 patch touches:
 
 - `src/sensor_cs1237.c`
 - `src/Kconfig`
@@ -25,27 +24,13 @@ CS1237 portion:
 - `klippy/extras/cs1237.py`
 - `klippy/extras/load_cell.py`
 - `klippy/extras/load_cell_probe.py`
+- `docs/Config_Reference.md`
+- `test/klippy/load_cell.cfg`
 
-GD32 USB portion (separate logical patch in same file):
+## 3) Relationship to the USB patch
 
-- `src/stm32/usbotg.c`
-- `src/stm32/Kconfig`
-- `src/generic/usb_cdc_ep.h`
-
-Additional local changes present in the combined patch:
-
-- `klippy/mcu.py`
-
-That `klippy/mcu.py` change is not part of the core CS1237 mechanism described below.
-
-## 3) Common-file clarification between the two logical patches
-
-There is no direct source-file overlap between CS1237 and GD32 USB logic in Klipper.
-
-- USB work is isolated under `src/stm32/*` and USB endpoint definitions.
-- CS1237 work is isolated under sensor/build/klippy-extras files listed above.
-
-So when shipping both together in one patch file, they are still logically separable.
+The CS1237 and GD32 USB changes are separate and do not modify the same source
+files.
 
 ## 4) How CS1237 fits mainline architecture
 
@@ -136,10 +121,9 @@ Main responsibilities:
 3. Start/stop streaming via bulk helpers
 4. Convert/report samples and map sensor-specific error codes
 
-Also registers aliases:
-
-- `cs1237`
-- `c_sensor`
+The sensor type is `cs1237`. Its options include `sample_rate`, `gain`,
+`channel`, and `refout_off`; force direction is handled by the native
+`sensor_orientation` option.
 
 ## 8) Load-cell integration files
 
@@ -157,7 +141,7 @@ Result:
 
 - existing load-cell and load-cell-probe flows can instantiate CS1237 through normal `sensor_type` selection.
 
-## 9) Relationship to GD32 USB patch
+## 9) Relationship to the other Q2 patches
 
 CS1237 does not implement the USB workaround.
 
@@ -165,6 +149,10 @@ Both are required for full Q2 stock-hardware usability:
 
 1. GD32 USB patch: stable mainboard USB flashing/runtime communication
 2. CS1237 patch: working load-cell support on mainline
+
+The third Klipper patch extends the multi-MCU trigger synchronization timeout
+used by the Q2 load-cell path. It does not alter CS1237 sampling or force
+calibration.
 
 For USB details, see [GD32F425_USB_PATCH_EXPLAINED.md](GD32F425_USB_PATCH_EXPLAINED.md).
 
@@ -175,3 +163,8 @@ After firmware patching, setup/calibration should follow Klipper load-cell commi
 Q2-specific practical workflow used in this project is documented here:
 
 - [docs/LOAD_CELL_CALIBRATION.md](docs/LOAD_CELL_CALIBRATION.md)
+
+The force calibration stores `counts_per_gram` and `reference_tare_counts`.
+The Q2 nozzle itself is the probe, so `[load_cell_probe] z_offset` remains
+`0`; material/first-layer correction is saved separately as a runtime G-code
+offset.

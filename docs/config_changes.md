@@ -1,8 +1,24 @@
 # Qidi Q2 Config Changes (Stock Qidi -> Mainline)
 
-This page lists full target sections to use when moving from stock Qidi config to mainline Klipper on Q2.
+This page lists target sections to use when moving from stock Qidi config to
+mainline Klipper on Q2. It also covers users updating from the earlier
+mainline configuration, which used a software-SPI MAX6675 workaround.
 
-Use each full section block as the reference state, then adapt only machine-specific values (MCU serial IDs, tuned values).
+Merge these changes into the files included by your active `printer.cfg` and
+retain machine-specific serial IDs and tuning. This is not a complete printer
+profile.
+
+## Stock configuration boundary
+
+The stock `printer.cfg` includes `MCU_ID.cfg`, `gcode_macro.cfg`, `plr.cfg`, and
+`box.cfg`. Mainline Klipper does not provide Qidi's proprietary Python extras.
+Inspect every file still included by the active `printer.cfg`: retain ordinary
+Klipper configuration and macros, but remove an include or dependent macro call
+when its Qidi-only object is no longer available.
+
+The supplied `personal_config_reference/` is a complete adapted example. It is
+not a replacement for another printer's serial IDs, tuning, calibration, or
+optional hardware configuration.
 
 ## 1) `printer.cfg` sections
 
@@ -10,12 +26,13 @@ Use each full section block as the reference state, then adapt only machine-spec
 
 ```ini
 [mcu]
-serial: /dev/serial/by-id/usb-Klipper_stm32f407xx_<your_id>-if00 # Note, replace this with the actual path for your mainboard mcu
+serial: /dev/serial/by-id/usb-Klipper_stm32f407xx_<actual-id>-if00
 restart_method: command
 ```
 
 Changes:
-- Adds explicit mainboard `[mcu]` section in `printer.cfg`.
+- Replace the stock `MCU_ID.cfg` dependency with one active `[mcu]` definition,
+  either in `printer.cfg` or a retained include.
 
 Why:
 - Mainline Klipper setup should not depend on vendor include files for the primary MCU definition.
@@ -40,140 +57,59 @@ Why:
 
 ```ini
 [stepper_z]
-step_pin:PC10
-dir_pin:PA15
-enable_pin:!PC11
-microsteps: 128
-rotation_distance: 4
-full_steps_per_rotation: 200
-endstop_pin: PC3
-position_endstop: -2
-position_max: 265
-position_min: -2
-homing_speed: 10
-second_homing_speed: 5
-homing_retract_dist: 10.0
+endstop_pin: probe:z_virtual_endstop
 homing_positive_dir: false
-
-[stepper_z1]
-step_pin:PB1
-dir_pin:PB6
-enable_pin:!PB0
-microsteps: 128
-rotation_distance: 4
-full_steps_per_rotation: 200
 ```
 
 Changes:
-- Removes stock reverse-homing settings (`*_reverse` keys).
-- Uses direct Z endstop pin with a mainline-compatible Z model.
+- Remove `endstop_pin_reverse`, `position_endstop_reverse`, and
+  `homing_positive_dir_reverse` from the stock `[stepper_z]` section.
+- Remove `endstop_pin_reverse` from the stock `[stepper_z1]` section.
+- Uses the native load-cell probe virtual endstop.
+- Retain the printer's existing Z pins, rotation distance, travel limits, and
+  appropriate homing speeds.
 
 Why:
 - Mainline klipper does not contain Qidi reverse-homing logic.
-- Klipper's implementation of load_cell_probe requires defining an endstop pin, but it isn't used.
+- Current mainline Klipper supports native Z homing through
+  `probe:z_virtual_endstop`.
 
-### 1.4 X/Y TMC2240 driver sections
-
-```ini
-[tmc2240 stepper_x]
-spi_software_sclk_pin:PA5
-spi_software_miso_pin:PA6
-spi_software_mosi_pin:PA7
-spi_speed:200000
-cs_pin:PC12
-diag0_pin:!PB8
-interpolate:true
-run_current: 1.07
-stealthchop_threshold:0
-driver_SGT:1
-driver_SLOPE_CONTROL:2
-
-[tmc2240 stepper_y]
-spi_software_sclk_pin:PA5
-spi_software_miso_pin:PA6
-spi_software_mosi_pin:PA7
-spi_speed:200000
-cs_pin:PD2
-diag0_pin:!PC0
-interpolate:true
-run_current: 1.07
-stealthchop_threshold:0
-driver_SGT:1
-driver_SLOPE_CONTROL:2
-```
-
-Changes:
-- Enables `driver_SLOPE_CONTROL:2` on both X and Y.
-
-Why:
-- This reduces stepper heat on Q2 compared to stock commented-out values.
-
-### 1.5 Extruder section (MAX6675 software SPI)
+### 1.4 Extruder section (MAX6675 hardware SPI)
 
 ```ini
 [extruder]
-step_pin:THR:PB9
-dir_pin:!THR:PB8
-enable_pin:!THR:PC15
-rotation_distance: 53.7
-gear_ratio: 1517:170
-microsteps: 16
-full_steps_per_rotation: 200
-nozzle_diameter: 0.400
-filament_diameter: 1.75
-min_temp: 0
-max_temp: 375
-min_extrude_temp: 170
-smooth_time: 0.000001
-heater_pin:THR:PB15
-sensor_type:MAX6675
-sensor_pin:THR:PB12
-spi_speed: 100000
-spi_software_sclk_pin:THR:PB13
-spi_software_miso_pin:THR:PB14
-spi_software_mosi_pin:THR:PA15
-# spi_bus: spi2
-max_power: 1
-pressure_advance: 0.032
-pressure_advance_smooth_time: 0.03
-max_extrude_cross_section:500
-instantaneous_corner_velocity: 10.000
-max_extrude_only_distance: 1000.0
-max_extrude_only_velocity:5000
-max_extrude_only_accel:5000
+sensor_type: MAX6675
+sensor_pin: THR:PB12
+spi_bus: spi2_PB14_PC0_PB13
+spi_speed: 2000000
 ```
 
 Changes:
-- Enable software SPI pins for MAX6675.
-- Disabled `spi_bus: spi2`.
+- Replace the stock `spi_bus: spi2` value with the explicit mapping above.
+- If updating from the older mainline configuration, remove all
+  `spi_software_*` keys from `[extruder]`.
+- Preserve the printer's remaining extruder, heater, PID, and extrusion values.
 
 Why:
-- Required for stock toolhead board to boot with mainline klipper.
+- The mapping uses `PB14` for MISO, `PB13` for SCK, and `PC0` as the unused
+  MOSI pin, leaving heater output `PB15` available.
 
-### 1.6 Chamber heater section
+### 1.5 Chamber heater section
 
 ```ini
 [heater_generic chamber]
-heater_pin:PC8
-max_power:1.0
-sensor_type:NTC 100K MGB18-104F39050L32
-sensor_pin:PA1
-control = pid
-pid_Kp=63.418
-pid_Ki=1.342
-pid_Kd=749.125
-min_temp:-100
-max_temp:70
-# z_max_limit:230
+z_max_limit: 230  # Remove this stock Qidi-only option.
 ```
 
 Changes:
-- Comments out `z_max_limit`.
+- Remove `z_max_limit`; do not merely copy the commented example into the
+  active section.
 
 Why:
-- Mainline klipper does not have `z_max_limit` as a parameter in this section. Make note of that for your personal use and adjust accordingly.
+- Mainline Klipper does not support `z_max_limit` in this section. Preserve the
+  other chamber-heater settings.
 
-### 1.7 Load-cell probe section (replaces stock `probe_air`)
+### 1.6 Load-cell probe section (replaces stock `probe_air`)
 
 ```ini
 [load_cell_probe]
@@ -182,6 +118,11 @@ sclk_pin: THR:PB3
 dout_pin: THR:PB4
 sample_rate: 1280
 gain: 128
+# CS1237 channel and reference-output settings.
+channel: A
+refout_off: False
+sensor_orientation: normal
+# The nozzle is the probe. Save material/first-layer adjustment separately.
 z_offset: 0
 speed: 5
 lift_speed: 5
@@ -193,6 +134,7 @@ samples_tolerance_retries: 10
 # Force threshold in grams that counts as a tap.
 # 75g is conservative for a direct-drive setup; lower if probe misses taps.
 trigger_force: 75
+force_safety_limit: 2000
 # Uncomment and fill in after running LOAD_CELL_CALIBRATE:
 #counts_per_gram: ...
 #reference_tare_counts: ...
@@ -200,6 +142,12 @@ trigger_force: 75
 
 Changes:
 - Replaces stock `probe_air` block with mainline `load_cell_probe` using `cs1237`.
+- Remove the stock `c_sensor`, `voltage`, `delta_v`, and probe-offset values;
+  they are not options for the native mainline integration.
+- Keeps probe `z_offset` at zero and uses a separate runtime G-code offset for
+  first-layer adjustment.
+- Retain existing force-calibration values only when they belong to this
+  printer, then verify them with the diagnostic and tap tests.
 
 Why:
 - The CS1237 patch integrates into Klipper's mainline load-cell probe stack.
@@ -209,172 +157,89 @@ Why:
 ### 2.1 Z load-cell homing macros
 
 ```ini
-[gcode_macro _HOME_Z_FROM_LAST_PROBE]
+[gcode_macro save_zoffset]
 gcode:
-    {% set z_probed = printer.probe.last_probe_position.z %}
-    {% set z_position = printer.toolhead.position[2] %}
-    {% set z_actual = z_position - z_probed %}
-    SET_KINEMATIC_POSITION Z={z_actual}
+    {% if printer.gcode_move.homing_origin.z < 0.5 %}
+       SAVE_VARIABLE VARIABLE=z_offset VALUE={printer.gcode_move.homing_origin.z}
+    {% endif %}
+
+[gcode_macro set_zoffset]
+gcode:
+    {% set z = printer.save_variables.variables.z_offset|default(0) %}
+    SET_GCODE_OFFSET Z={z} MOVE=0
 
 [gcode_macro _HOME_Z]
 gcode:
-    SET_GCODE_OFFSET Z=0
-    SET_KINEMATIC_POSITION Z={printer.toolhead.axis_maximum[2]}
-
-    PROBE
-    _HOME_Z_FROM_LAST_PROBE
-
-    G91
-    G1 Z2 F300
-
-    PROBE
-    _HOME_Z_FROM_LAST_PROBE
-
+    SET_GCODE_OFFSET Z=0 MOVE=0
+    G28 Z
     G91
     G1 Z10 F600
+    G90
 ```
 
 Changes:
-- Adds dedicated load-cell homing logic for Z with two-probe solve.
+- Uses native `G28 Z` through `probe:z_virtual_endstop`.
+- Keeps the saved first-layer adjustment separate from the probe definition.
 
 Why:
-- Replaces stock reverse-homing/G28-Z assumptions with mainline probe-based Z solve.
+- Current mainline load-cell probing no longer requires the former
+  `_HOME_Z_FROM_LAST_PROBE` kinematic workaround.
 
 ### 2.2 Homing override
 
-```ini
-[homing_override]
-axes: xy
-gcode:
-    M204 S10000
-    M220 S100
-    SET_STEPPER_ENABLE STEPPER=extruder enable=0
-
-    {% if 'X' in params and 'Y' not in params %}
-        _HOME_X
-    {% endif %}
-
-    {% if 'Y' in params and 'X' not in params %}
-        _HOME_Y
-    {% endif %}
-
-    {% if 'X' in params and 'Y' in params %}
-        _HOME_XY
-    {% endif %}
-
-    {% if 'X' not in params and 'Y' not in params %}
-        SET_KINEMATIC_POSITION X=100
-        SET_KINEMATIC_POSITION Y=100
-        SET_KINEMATIC_POSITION Z={printer.toolhead.axis_maximum.z / 2}
-        G91
-        G1 Z5 F600
-        G4 P500
-        _HOME_XY
-        G90
-        G1 X{printer['gcode_macro PRINTER_PARAM'].max_x_position / 2} Y{printer['gcode_macro PRINTER_PARAM'].max_y_position / 2} F7800
-        M400
-        _HOME_Z
-    {% endif %}
-
-    M204 S10000
-    G90
-```
+If the configuration uses `[homing_override]`, include Z in its `axes` option
+and route requested Z homing through `_HOME_Z`. Preserve the printer's existing
+X/Y homing behavior. A complete working example is available in
+`personal_config_reference/gcode_macro.cfg`.
 
 Changes:
-- Routes full-home path through `_HOME_Z` instead of direct `G28 Z` stock flow.
+- Allows full and Z-only homing to reach the native load-cell virtual endstop.
 
 Why:
-- Ensures Z homing follows the mainline load-cell method.
+- An override that intercepts Z without dispatching it prevents `G28 Z` from
+  reaching the native homing path.
 
-### 2.3 Print start and end macros (mainline-safe)
+### 2.3 Stock macro audit
 
-```ini
-[gcode_macro PRINT_START]
-gcode:
-    DISABLE_ALL_SENSOR
-    CLEAR_PAUSE
+The stock macros span `gcode_macro.cfg`, `plr.cfg`, and the box configuration.
+Audit `PRINT_START`, `PRINT_END`, `CANCEL_PRINT`, `PAUSE`, `RESUME_PRINT`, and
+any filament-change macros against the includes retained on this printer.
 
-    {% set bedtemp = params.get('BED')|int %}
-    {% set hotendtemp = params.get('HOTEND')|int %}
-    {% set chambertemp = params.get('CHAMBER', 0)|int %}
+Calls associated with omitted Qidi box or power-loss-recovery components may
+include:
 
-    M104 S0
-    M140 S{bedtemp}
-    M141 S{chambertemp}
-    G28
-    SET_GCODE_OFFSET Z=0 MOVE=0
+- `BUFFER_MONITORING` and `box_extras` objects;
+- `DISABLE_BOX_HEATER`;
+- `CLEAR_LAST_FILE` and `save_last_file`; and
+- `G31` or other helper macros whose definitions or dependencies were removed.
 
-    {% if bedtemp != 0 %}
-      TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM={bedtemp * 0.95} MAXIMUM={bedtemp * 1.05}
-    {% endif %}
+Do not remove a normal G-code macro merely because it originated in the stock
+configuration. Remove or replace a call only when its defining include or
+underlying Qidi-only object is absent from the mainline installation.
 
-    # Ensure that nozzle is properly heated up for probing
-    M109 S140
-    M400
+Preserve the printer's heating, cleaning, meshing, filament, and parking
+workflow. Update the Z portion so the runtime offset is cleared before probing,
+native Z homing is used, and the saved first-layer offset is applied only after
+probing:
 
-    # Move nozzle to center of bed for tap
-    G90
-    G1 X135 Y135 F7800
-    # Tap and home z via PROBE command
-    PROBE
-    # Adjust for z tilt
-    Z_TILT_ADJUST
-
-    # Calibrate an adaptive bed mesh with klippers built-in adaptive meshing
-    BED_MESH_CALIBRATE PROFILE=adaptive ADAPTIVE=1
-
-    # Move to corner and wait for hotend to heat up to print temp before printing
-    G0 Z30 F600
-    G0 X260 Y5 F6000
-    M109 S{hotendtemp}
-    M204 S10000
-
-    # Set z offset (usually saved in saved_variables.cfg), it is 0.04mm in my case.
-    set_zoffset
-    # Enable filament sensor and start print
-    ENABLE_ALL_SENSOR
-
-[gcode_macro PRINT_END]
-gcode:
-    M400
-    DISABLE_ALL_SENSOR
-
-    {% if 'x' in printer.toolhead.homed_axes and 'y' in printer.toolhead.homed_axes and 'z' in printer.toolhead.homed_axes %}
-        G91
-        G1 E-3 F1800
-        G1 Z3 F600
-        G90
-        G0 X{printer['gcode_macro PRINTER_PARAM'].clear_x_position} Y{printer['gcode_macro PRINTER_PARAM'].clear_y_position} F12000
-        _Z_CLEARANCE DISTANCE=50
-    {% endif %}
-
-    M104 S0
-    M140 S0
-    M141 S0
-    M106 P2 S0
-    M106 P0 S0
-    M106 P3 S0
-
-    save_zoffset
-    SET_IDLE_TIMEOUT TIMEOUT={printer.configfile.settings.idle_timeout.timeout}
-    CLEAR_PAUSE
-    M220 S100
-    M221 S100
-    BED_MESH_CLEAR
-    M84
-
+```gcode
+SET_GCODE_OFFSET Z=0 MOVE=0
+G28 Z
+Z_TILT_ADJUST
+# Run bed meshing as required by this printer.
+set_zoffset
 ```
 
-Changes:
-- Removes vendor-only calls and dependencies (`BUFFER_MONITORING`, `DISABLE_BOX_HEATER`, `G31`, `CLEAR_LAST_FILE`, `box_extras`).
-- Keeps core start/end/cancel behavior needed for normal printing.
-
-Why:
-- Prevents runtime errors on mainline configs without Qidi proprietary macro ecosystem.
+The complete adapted personal example shows these changes in context; copy
+only the portions appropriate for the target printer.
 
 ## 3) Notes
 
 - Full minimal reference sections are also available in:
   - `config_changes/printer.cfg`
   - `config_changes/gcode_macro.cfg`
+- A complete adapted personal configuration is available in
+  `personal_config_reference/`.
 - Load-cell commissioning workflow is documented in `docs/LOAD_CELL_CALIBRATION.md`.
+- Keep `[load_cell_probe] z_offset: 0`. Do not use `PROBE_CALIBRATE` or
+  `Z_OFFSET_APPLY_PROBE` to save a material or first-layer adjustment.

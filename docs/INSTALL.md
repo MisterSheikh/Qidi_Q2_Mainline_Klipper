@@ -2,6 +2,10 @@
 
 This is the installation workflow for running mainline-style Klipper on stock Qidi Q2 hardware.
 
+If a Q2 mainline port and patched Katapult bootloaders are already installed,
+use the
+[existing-installation update guide](KLIPPER_UPDATE_AND_FLASH.md) instead.
+
 ## 0) Scope and safety
 
 - This process flashes both MCUs and can brick boards if done incorrectly.
@@ -15,8 +19,14 @@ Use the [qidi community Q2 wiki](https://github.com/qidi-community/q2-wiki) guid
 - [Update Debian package sources.](https://github.com/qidi-community/q2-wiki/blob/main/content/debian-package-sources/README.md)
 - [Update and fix KIAUH](https://github.com/qidi-community/q2-wiki/blob/main/content/kiauh-update-and-fix/README.md)
 - [Disable unused processes](https://github.com/bluedrool/Qidi-Q2-tuning-tweaks-and-mods/blob/main/docs/processes.md)
-- Remove the stock qidi Klipper, Moonraker,Fluidd and Crowsnest installation with KIAUH.
-Note: you may need to delete or disable the klipper-mcu.service if its running on your system. When deleting Qidi Klipper with KIAUH, check for errors that files ere not deleted, (e.g., "/klipper could not be deleted"), then do `sudo rm -rf ~/<folder that did not get deleted>`.
+- Remove the stock Qidi Klipper, Moonraker, Fluidd, and Crowsnest installation
+  with KIAUH.
+
+You may also need to disable or remove `klipper-mcu.service`. If KIAUH reports
+that a directory was not removed, resolve its exact path, inspect its contents,
+and move it aside or remove that specific directory only after confirming it is
+the obsolete installation. Do not run a recursive removal command against an
+unresolved placeholder or broad home-directory path.
 
 Before continuing, confirm:
 
@@ -29,7 +39,7 @@ Before continuing, confirm:
 
 Use KIAUH to install:
 
-- Latest `klipper`
+- The `klipper` host service and Python environment
 - Latest `moonraker`
 - Your web UI of choice (`mainsail` or `fluidd`)
 - Any optional components you want (Input shaping dependencies for example)
@@ -47,38 +57,61 @@ git clone https://github.com/dw-0/kiauh.git
 ```bash
 sudo apt update
 sudo apt install -y -t bullseye-backports stlink-tools git python3-serial
+command -v arm-none-eabi-gcc
+command -v arm-none-eabi-objcopy
+command -v make
+~/klippy-env/bin/python -c 'import numpy; print(numpy.__version__)'
 ```
 
 Notes:
 
 - `bullseye-backports` is required to get a more recent version of `stlink-tools` (1.7 instead of 1.6.1)
 - `python3-serial` (pyserial) is required for Katapult `flashtool.py`.
+- KIAUH normally installs the ARM compiler, binary utilities, and build tools
+  with Klipper. If any of the three `command -v` checks fail, install the
+  missing build dependencies:
+
+  ```bash
+  sudo apt install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi make
+  ```
+
+- NumPy is required by `[load_cell_probe]`, but it may already be present from
+  the stock environment or optional input-shaper dependencies. If the NumPy
+  import check fails, install it in Klipper's Python environment:
+
+  ```bash
+  ~/klippy-env/bin/python -m pip install numpy
+  ```
+
 - Keep `~/klipper` from KIAUH and clone `katapult` into home.
 
-## 4) Get upstream sources and record versions
+## 4) Get upstream sources
 
-If `~/klipper` already exists from KIAUH, keep it and update it:
+If `~/klipper` already exists from KIAUH, keep it. Start from the current
+upstream Klipper `master` revision:
 
 ```bash
-cd ~/klipper
-git fetch --all
-git pull --ff-only
+git -C ~/klipper fetch https://github.com/Klipper3d/klipper.git master
+git -C ~/klipper checkout --detach FETCH_HEAD
 ```
 
-Clone Katapult:
+Clone Katapult if needed, then start from its current upstream `master`
+revision:
 
 ```bash
 cd ~
 if [ ! -d katapult ]; then
   git clone https://github.com/Arksine/katapult.git
-else
-  cd katapult
-  git fetch --all
-  git pull --ff-only
 fi
+cd ~/katapult
+git fetch https://github.com/Arksine/katapult.git master
+git checkout --detach FETCH_HEAD
 ```
 
-Known-good fallback commits are listed in [KNOWN_GOOD_MATRIX.md](KNOWN_GOOD_MATRIX.md).
+The known-good fallback revisions are listed in
+[KNOWN_GOOD_MATRIX.md](KNOWN_GOOD_MATRIX.md). Current upstream is attempted
+first; those checkpoints remain available if a patch compatibility check fails
+or the current revision does not build or operate correctly.
 
 ## 5) Apply Q2 patches from this repo
 
@@ -94,7 +127,7 @@ cd Qidi_Q2_Mainline_Klipper
 Run the helper script:
 
 ```bash
-./apply_patch.sh
+./apply_patch.sh all
 ```
 
 By default it targets:
@@ -105,17 +138,23 @@ By default it targets:
 If your repos are elsewhere, override paths when running:
 
 ```bash
-KLIPPER_DIR=/path/to/klipper KATAPULT_DIR=/path/to/katapult ./apply_patch.sh
+KLIPPER_DIR=/path/to/klipper \
+KATAPULT_DIR=/path/to/katapult \
+./apply_patch.sh all
 ```
 
-If patch apply fails on latest upstream, checkout known-good commits and rerun `./apply_patch.sh`:
+The helper checks the complete ordered series before modifying either checkout.
+
+If the check fails, do not force the patches. Confirm that both repositories
+are clean, then check out the fallback printed by the helper and rerun it. The
+fallback revisions can also be printed directly:
 
 ```bash
-cd ~/klipper && git checkout 187481e2514f30fbaa19241869f4485ab4289cea
-cd ~/katapult && git checkout b0bf421069e2aab810db43d6e15f38817d981451
-
 cd ~/Qidi_Q2_Mainline_Klipper
-./apply_patch.sh
+./apply_patch.sh --print-klipper-known-good
+./apply_patch.sh --print-katapult-known-good
+git -C ~/klipper status --short
+git -C ~/katapult status --short
 ```
 
 ## 6) Mainboard (GD32F425) Katapult build + ST-Link flash
@@ -126,6 +165,8 @@ Configure katapult for the mainboard:
 
 ```bash
 cd ~/katapult
+cp ~/Qidi_Q2_Mainline_Klipper/katapult_patch/.main_mcu.config .config
+make olddefconfig
 make menuconfig
 ```
 
@@ -137,7 +178,7 @@ Build the firmware:
 
 ```bash
 make clean
-make -j"$(nproc)"
+make -j1
 ```
 
 ### 6.2 ST-Link wiring and power (mainboard)
@@ -199,6 +240,8 @@ Configure klipper for the mainboard:
 
 ```bash
 cd ~/klipper
+cp ~/Qidi_Q2_Mainline_Klipper/klipper_patch/.main_mcu.config .config
+make olddefconfig
 make menuconfig
 ```
 
@@ -209,7 +252,7 @@ Then build:
 ```bash
 cd ~/klipper
 make clean
-make -j"$(nproc)"
+make -j1
 ```
 
 ### 7.2 Flash Klipper to mainboard over Katapult USB
@@ -218,7 +261,7 @@ Replace serial ID with your device path:
 
 ```bash
 python3 ~/katapult/scripts/flashtool.py \
-  -d /dev/serial/by-id/usb-katapult_stm32f407xx_BE2F32373534350E35353635-if00 \
+  -d /dev/serial/by-id/usb-katapult_stm32f407xx_<actual-id>-if00 \
   -f ~/klipper/out/klipper.bin
 ```
 
@@ -233,7 +276,8 @@ The toolhead follows a similar flow with key hardware/runtime differences.
 1. Fully disconnect toolhead board from the printer before ST-Link flashing.
 2. Solder headers for ST-Link access if not already present.
 3. For toolhead ST-Link flashing, **connect 3V3** from ST-Link.
-Refer to the pinout here: [TH-Board Pinout](../board_pinouts/A-9(GD)%20V1.2_002%20PIN.pdf)
+Refer to the pinout here:
+[TH-Board Pinout](../board_pinouts/A-9%28GD%29%20V1.2_002%20PIN.pdf)
 
 NOTE: Do not Disable SWD at startup as we do not use pins PA13 and PA14 on this board. Therefore we don't need them to be available via the disable SWD patch.
 
@@ -243,6 +287,8 @@ Configure katapult for the toolhead:
 
 ```bash
 cd ~/katapult
+cp ~/Qidi_Q2_Mainline_Klipper/katapult_patch/.th_mcu.config .config
+make olddefconfig
 make menuconfig
 ```
 
@@ -254,7 +300,7 @@ Build the firmware:
 
 ```bash
 make clean
-make -j"$(nproc)"
+make -j1
 ```
 
 Flash Katapult over ST-Link:
@@ -271,6 +317,8 @@ Configure klipper for the toolhead:
 
 ```bash
 cd ~/klipper
+cp ~/Qidi_Q2_Mainline_Klipper/klipper_patch/.th_mcu.config .config
+make olddefconfig
 make menuconfig
 ```
 
@@ -278,11 +326,15 @@ make menuconfig
 
 Make sure you match the settings shown in the image, then press `q` and `y` to save and quit.
 
+The patched firmware exposes the Q2 GD32F303 toolhead mapping as
+`spi2_PB14_PC0_PB13`. Use that explicit name in the MAX6675 configuration so
+native SPI2 does not reserve the heater output on `PB15`.
+
 Then build:
 
 ```bash
 make clean
-make -j"$(nproc)"
+make -j1
 ```
 
 Flash over UART device `/dev/ttyS4` at baud `500000`:
@@ -304,12 +356,25 @@ Also provided here as quick and easy references:
 
 - [config_changes/printer.cfg](../config_changes/printer.cfg)
 - [config_changes/gcode_macro.cfg](../config_changes/gcode_macro.cfg)
+- [complete adapted personal configuration](../personal_config_reference/README.md)
 
 Required adjustments per machine:
 
 1. Mainboard MCU serial path in `[mcu]` (from `/dev/serial/by-id/...`).
-2. Mainline homing/load-cell macro flow.
-3. Any per-machine tuning values in your local config.
+2. Remove the stock Qidi reverse-homing options and keep
+   `[stepper_z] endstop_pin: probe:z_virtual_endstop`.
+3. Replace stock `spi_bus: spi2` or the older mainline software-SPI workaround
+   with `spi_bus: spi2_PB14_PC0_PB13` for the MAX6675.
+4. Remove stock chamber `z_max_limit` and replace `[probe_air]`/`c_sensor` with
+   `[load_cell_probe]`/`cs1237`, keeping `z_offset: 0`.
+5. Use native `G28 Z` homing while retaining the separate
+   `saved_variables.cfg` first-layer-offset workflow.
+6. Remove stock includes or macro calls that depend on unavailable Qidi-only
+   components.
+7. Preserve and verify all per-machine tuning and calibration values.
+
+Merge the documented sections into the configuration actually included by
+`printer.cfg`; do not replace your complete personal configuration.
 
 ## 10) Validation checklist
 
@@ -323,15 +388,22 @@ Required adjustments per machine:
 
 ## 11) Troubleshooting quick notes
 
-1. `git apply --check` fails: use known-good fallback commits from [KNOWN_GOOD_MATRIX.md](KNOWN_GOOD_MATRIX.md), then reapply.
+1. `git apply --check` fails on current upstream: confirm the checkout is
+   clean, then use the relevant fallback in
+   [KNOWN_GOOD_MATRIX.md](KNOWN_GOOD_MATRIX.md).
 2. No Katapult USB after mainboard ST-Link flash: run probe again and rerun erase/write commands.
 3. `flashtool.py` import errors: ensure `python3-serial` is installed.
 4. Toolhead flash UART failures: confirm `/dev/ttyS4` exists, board is correctly powered/wired, and baud is `500000`.
 
 ## 12) Future firmware updates
 
-When updating your firmware in the future, make sure to reapply the patches before compiling firmware. Once firmware is compiled, you use katapult to flash it. See the mcu flash scripts for reference.
+For an existing installation with working Katapult bootloaders, follow
+[KLIPPER_UPDATE_AND_FLASH.md](KLIPPER_UPDATE_AND_FLASH.md). A generic Klipper
+update does not apply or validate the required Q2 patches.
 
 ## 13) Post install
 
-Calibrate the CS1237 load cell by following [LOAD_CELL_CALIBRATION.md](/docs/LOAD_CELL_CALIBRATION.md)
+Calibrate or validate the CS1237 force scale by following
+[LOAD_CELL_CALIBRATION.md](LOAD_CELL_CALIBRATION.md). Keep
+`[load_cell_probe] z_offset: 0`; tune and save the separate runtime
+first-layer offset during an actual print.

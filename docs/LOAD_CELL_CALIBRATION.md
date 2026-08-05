@@ -4,12 +4,19 @@ This document explains the practical calibration workflow used on Qidi Q2 with t
 
 It follows Klipper's load-cell calibration model, with Q2-specific handling for safely applying a known force.
 
+This guide calibrates force measurement only. The Q2 nozzle is the probe, so
+`[load_cell_probe] z_offset` remains `0`. First-layer adjustment is a separate
+runtime G-code offset.
+
 ## 1) Prerequisites
 
 1. CS1237 patch is applied and firmware is running.
-2. `[load_cell_probe]` is configured (for example from `loadcell.cfg`).
-3. Utility macro `Fake_Home_Z_MAX` is available (see `utility_macros.cfg`).
-Copy to your Klipper config directory and add `[include utility_macros.cfg]` to `printer.cfg`.
+2. `[load_cell_probe]` is configured. `loadcell.cfg` is an optional reference
+   fragment; merge it into the active configuration or include it, but do not
+   define `[load_cell_probe]` twice.
+3. Utility macros `Fake_Home_Z` and `Fake_Home_Z_MAX` are available (see
+   `utility_macros.cfg`). Copy that file to your Klipper config directory and
+   add `[include utility_macros.cfg]` to `printer.cfg`.
 4. You have a reliable digital scale capable of measuring at least 2 kg.
 5. You can move Z from the web UI/console.
 
@@ -37,6 +44,11 @@ LOAD_CELL_DIAGNOSTIC
 3. Then perform calibration (`LOAD_CELL_CALIBRATE` flow).
 
 Do not treat `LOAD_CELL_CALIBRATE` as optional if you want correct force behavior.
+
+An existing installation may retain that printer's current `counts_per_gram`
+and `reference_tare_counts` during the update, then validate them with the
+diagnostic and tap tests before deciding whether to recalibrate. Do not copy
+these machine-specific values from another Q2.
 
 ## 4) Practical Q2 calibration workflow used here
 
@@ -84,7 +96,31 @@ Successful calibration yields values for:
 
 These are the key parameters required for accurate force reporting and load-cell probe safety limits.
 
-## 6) Post-calibration checks
+## 6) Probe offset versus print offset
+
+Keep the probe definition at:
+
+```ini
+[load_cell_probe]
+z_offset: 0
+```
+
+Do not use the generic paper-based `PROBE_CALIBRATE` procedure for the Q2
+load-cell nozzle, and do not use `Z_OFFSET_APPLY_PROBE` to save a first-layer
+adjustment into the probe definition.
+
+Reset the runtime print offset before homing, Z tilt, and bed meshing:
+
+```gcode
+SET_GCODE_OFFSET Z=0 MOVE=0
+```
+
+After probing is complete, apply the saved value with `set_zoffset`. Tune that
+runtime offset while observing a real first layer for the material and build
+surface in use, then save it through the existing `save_zoffset` macro and
+`saved_variables.cfg`.
+
+## 7) Post-calibration checks
 
 After saving config:
 
@@ -93,7 +129,7 @@ After saving config:
 3. Run `LOAD_CELL_TEST_TAP` and confirm reliable trigger behavior.
 4. Verify probing/homing behavior before full print workflows.
 
-## 7) Notes specific to this repo
+## 8) Notes specific to this repo
 
 1. `loadcell.cfg` includes useful setup context, but follow this calibration flow for final commissioning.
 2. Macro names used in this workflow are `Fake_Home_Z` and `Fake_Home_Z_MAX` (exact case as defined in `utility_macros.cfg`).
