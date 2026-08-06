@@ -44,6 +44,8 @@ Purpose:
 - Add the MCU-side CS1237 driver and host bulk-sensor wrapper.
 - Register `cs1237` with the current load-cell and load-cell-probe registries.
 - Integrate with the current trigger-analog and bulk-sensor interfaces.
+- Account for missed conversion windows without publishing invalid samples or
+  forcing sensor restart loops.
 - Preserve other current upstream load-cell sensor registrations.
 
 The February `c_sensor` compatibility alias is not part of the active port.

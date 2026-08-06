@@ -13,6 +13,7 @@ UPDATE_INTERVAL = 0.10
 SAMPLE_ERROR_TIMEOUT = -0x80000000
 SAMPLE_ERROR_LONG_READ = 0x40000000
 SAMPLE_ERROR_CONFIG = 0x20000000
+SAMPLE_MISSED = 0x10000000
 
 # Sensor-specific trigger_analog errors (from sensor_cs1237.c)
 CS1237_ERR_CONFIG_TIMEOUT = 1
@@ -31,7 +32,6 @@ class CS1237:
         self.printer = printer = config.get_printer()
         self.name = config.get_name().split()[-1]
         self.last_error_count = 0
-        self.consecutive_fails = 0
         self.query_cs1237_cmd = None
         # Chip options
         dout_pin_name = config.get('dout_pin')
@@ -120,6 +120,8 @@ class CS1237:
         adc_factor = 1. / (1 << 23)
         count = 0
         for ptime, val in samples:
+            if val == SAMPLE_MISSED:
+                continue
             if val in (SAMPLE_ERROR_TIMEOUT, SAMPLE_ERROR_LONG_READ,
                        SAMPLE_ERROR_CONFIG):
                 self.last_error_count += 1
@@ -130,7 +132,6 @@ class CS1237:
 
     # Start, stop, and process message batches
     def _start_measurements(self):
-        self.consecutive_fails = 0
         self.last_error_count = 0
         # Start bulk reading
         rest_ticks = self.mcu.seconds_to_clock(1. / (10. * self.sps))
@@ -149,25 +150,14 @@ class CS1237:
         logging.info("CS1237 finished '%s' measurements", self.name)
 
     def _process_batch(self, eventtime):
-        prev_overflows = self.ffreader.get_last_overflows()
         prev_error_count = self.last_error_count
         samples = self.ffreader.pull_samples()
         self._convert_samples(samples)
-        overflows = self.ffreader.get_last_overflows() - prev_overflows
         errors = self.last_error_count - prev_error_count
         if errors > 0:
             logging.error("%s: Forced sensor restart due to error", self.name)
             self._finish_measurements()
             self._start_measurements()
-        elif overflows > 0:
-            self.consecutive_fails += 1
-            if self.consecutive_fails > 4:
-                logging.error("%s: Forced sensor restart due to overflows",
-                              self.name)
-                self._finish_measurements()
-                self._start_measurements()
-        else:
-            self.consecutive_fails = 0
         return {'data': samples, 'errors': self.last_error_count,
                 'overflows': self.ffreader.get_last_overflows()}
 

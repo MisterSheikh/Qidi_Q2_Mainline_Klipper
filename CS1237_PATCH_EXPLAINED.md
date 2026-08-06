@@ -104,13 +104,15 @@ On failure:
 
 ### D) Sampling/error model
 
-Uses periodic capture + bulk reporting and defines sentinel/error paths for:
+The capture schedule follows the configured sample rate. If competing
+toolhead work causes a conversion window to be missed, the MCU resynchronizes
+with the CS1237 and reports an accounted missed slot instead of publishing an
+invalid force sample or forcing a sensor restart. The host preserves the time
+gap, filters the missed-slot marker from force data, and exposes it through
+overflow accounting.
 
-- timeout
-- overflow/long read path
-- config failure
-
-These errors are surfaced in a way load-cell probing logic can act on.
+Configuration failures and genuine sensor errors remain surfaced so the
+load-cell probing logic can act on them.
 
 ## 7) Host-side wrapper (`klippy/extras/cs1237.py`)
 

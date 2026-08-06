@@ -21,6 +21,9 @@ struct cs1237_adc {
     uint8_t flags;
     uint8_t sensor_error;
     uint32_t rest_ticks;
+    uint32_t period_ticks;
+    uint32_t read_window_ticks;
+    uint32_t pending_since;
     uint32_t last_error;
     int32_t last_sample;
     struct gpio_in dout_in; // bidirectional data-ready / data pin
@@ -31,7 +34,8 @@ struct cs1237_adc {
 };
 
 enum {
-    CS_PENDING = 1 << 0, CS_OVERFLOW = 1 << 1,
+    CS_PENDING = 1 << 0, CS_OVERFLOW = 1 << 1, CS_READING = 1 << 2,
+    CS_WAIT_HIGH = 1 << 3,
 };
 
 // Internal sample error values reported over bulk transport
@@ -39,6 +43,11 @@ enum {
 #define SAMPLE_ERROR_TIMEOUT (1L << 31)
 #define SAMPLE_ERROR_READ_TOO_LONG (1L << 30)
 #define SAMPLE_ERROR_CONFIG (1L << 29)
+#define SAMPLE_MISSED (1L << 28)
+
+// Datasheet t8 is 26.13us, during which conversion data must not be read.
+#define DATA_UPDATE_TIME_US 27
+#define SYNC_POLL_TIME_US 10
 
 // Sensor-specific errors passed to trigger_analog_note_error()
 enum {
@@ -252,6 +261,21 @@ cs1237_configure_chip(struct cs1237_adc *cs1237)
  * CS1237 Sensor Support
  ****************************************************************/
 
+// Return one nominal conversion period, rounded up to a whole MCU timer tick.
+static uint32_t
+cs1237_sample_period_ticks(uint8_t config)
+{
+    uint32_t sample_rate;
+    switch ((config >> 4) & 0x03) {
+    case 0: sample_rate = 10; break;
+    case 1: sample_rate = 40; break;
+    case 2: sample_rate = 640; break;
+    default: sample_rate = 1280; break;
+    }
+    uint32_t second_ticks = timer_from_us(1000000);
+    return (second_ticks + sample_rate - 1) / sample_rate;
+}
+
 // Event handler that wakes wake_cs1237() periodically
 static uint_fast8_t
 cs1237_event(struct timer *timer)
@@ -259,17 +283,36 @@ cs1237_event(struct timer *timer)
     struct cs1237_adc *cs1237 = container_of(timer, struct cs1237_adc, timer);
     uint32_t rest_ticks = cs1237->rest_ticks;
     uint8_t flags = cs1237->flags;
-    if (flags & CS_PENDING) {
-        cs1237->sb.possible_overflows++;
-        cs1237->flags = CS_PENDING | CS_OVERFLOW;
-        rest_ticks *= 4;
+    uint32_t now = timer_read_time();
+    if (flags & CS_READING) {
+        // DOUT carries sample bits during a read; it is not a DRDY signal.
+    } else if (flags & CS_WAIT_HIGH) {
+        // After a missed frame, first observe the short DOUT-high update phase
+        // so a persistent low level cannot be mistaken for a new DRDY edge.
+        if (!cs1237_is_data_ready(cs1237))
+            cs1237->flags = 0;
+        else
+            rest_ticks = timer_from_us(SYNC_POLL_TIME_US);
+    } else if (flags & CS_PENDING) {
+        // Once the safe read window closes, the pending frame may be updating
+        // or may already be a later conversion. Do not let the task read it.
+        uint32_t late_ticks = cs1237->read_window_ticks;
+        if (!(flags & CS_OVERFLOW)
+            && now - cs1237->pending_since >= late_ticks) {
+            cs1237->sb.possible_overflows++;
+            cs1237->flags = flags | CS_OVERFLOW;
+        }
     } else if (cs1237_is_data_ready(cs1237)) {
         // New sample pending
+        cs1237->pending_since = now;
         cs1237->flags = CS_PENDING;
         sched_wake_task(&wake_cs1237);
         rest_ticks *= 8;
     }
-    cs1237->timer.waketime += rest_ticks;
+    uint32_t next = cs1237->timer.waketime + rest_ticks;
+    if (!timer_is_before(now, next))
+        next = now + rest_ticks;
+    cs1237->timer.waketime = next;
     return SF_RESCHEDULE;
 }
 
@@ -291,39 +334,77 @@ add_sample(struct cs1237_adc *cs1237, uint8_t oid, uint32_t counts,
 static void
 cs1237_read_adc(struct cs1237_adc *cs1237, uint8_t oid)
 {
-    // Clear pending flag (and note if an overflow occurred)
+    // Claim the sample before bit-banging. The timer interrupt must not treat
+    // DOUT sample bits as fresh data-ready transitions while IRQs are polled.
     irq_disable();
     uint8_t flags = cs1237->flags;
-    cs1237->flags = 0;
+    if (!(flags & CS_PENDING) || (flags & CS_READING)) {
+        irq_enable();
+        return;
+    }
+    cs1237->flags = flags | CS_READING;
     irq_enable();
 
     uint32_t counts = 0;
-    if (flags & CS_OVERFLOW) {
-        cs1237->last_error = SAMPLE_ERROR_READ_TOO_LONG;
-        cs1237->sensor_error = CSE_OVERFLOW;
-    } else if (cs1237->last_error == 0) {
-        // Read from sensor (data ready should already be low)
-        if (!cs1237_is_data_ready(cs1237)) {
-            cs1237->last_error = SAMPLE_ERROR_TIMEOUT;
-            cs1237->sensor_error = CSE_READ_TIMEOUT;
+    uint8_t have_sample = 0;
+    uint8_t missed_sample = !!(flags & CS_OVERFLOW);
+    if (cs1237->last_error == 0) {
+        // pending_since is when polling noticed DRDY, which may be up to one
+        // poll interval after it first fell. Refuse a frame when that worst-
+        // case age reaches the sensor's data-update window.
+        if (!missed_sample
+            && timer_read_time() - cs1237->pending_since
+               >= cs1237->read_window_ticks) {
+            cs1237->sb.possible_overflows++;
+            missed_sample = 1;
+        }
+        // DOUT may have returned high if this task did not run before the
+        // sensor's next data-update window. Account for the lost conversion
+        // and let the timer find the next ready frame.
+        if (missed_sample) {
+            // The timer will find the next unambiguously ready frame.
+        } else if (!cs1237_is_data_ready(cs1237)) {
+            if (!missed_sample)
+                cs1237->sb.possible_overflows++;
+            missed_sample = 1;
         } else {
             uint8_t status_bits = 0;
             counts = cs1237_read_frame(cs1237, &status_bits);
-            (void)status_bits;
-            // Extend 24-bit 2's complement to 32 bits
-            if (counts & 0x800000)
-                counts |= 0xFF000000;
+            // update2 is reserved and must be zero. The 27th clock must also
+            // leave DOUT high. Either failure means framing was not reliable.
+            if ((status_bits & 0x02) || cs1237_is_data_ready(cs1237)) {
+                cs1237->sb.possible_overflows++;
+                missed_sample = 1;
+            } else {
+                // Extend 24-bit 2's complement to 32 bits
+                if (counts & 0x800000)
+                    counts |= 0xFF000000;
+                have_sample = 1;
+            }
         }
     }
+
+    uint8_t wait_high = cs1237->last_error == 0 && missed_sample
+                        && cs1237_is_data_ready(cs1237);
+    irq_disable();
+    cs1237->flags = wait_high ? CS_WAIT_HIGH : 0;
+    irq_enable();
 
     if (cs1237->last_error != 0) {
         counts = cs1237->last_error;
         trigger_analog_note_error(cs1237->ta, cs1237->sensor_error);
-    } else {
+        add_sample(cs1237, oid, counts, 0);
+        return;
+    }
+    // A non-ADC marker keeps the fixed-frequency bulk clock aligned while
+    // the host filters the missing conversion from force data.
+    if (missed_sample)
+        add_sample(cs1237, oid, SAMPLE_MISSED, 0);
+    if (have_sample) {
         cs1237->last_sample = (int32_t)counts;
         trigger_analog_update(cs1237->ta, counts);
+        add_sample(cs1237, oid, counts, 0);
     }
-    add_sample(cs1237, oid, counts, 0);
 }
 
 // Create a cs1237 sensor
@@ -370,6 +451,11 @@ command_query_cs1237(uint32_t *args)
         return;
     }
     // Start new measurements
+    cs1237->period_ticks = cs1237_sample_period_ticks(cs1237->config);
+    uint32_t unsafe_ticks = cs1237->rest_ticks
+                            + timer_from_us(DATA_UPDATE_TIME_US);
+    cs1237->read_window_ticks = cs1237->period_ticks > unsafe_ticks
+                                ? cs1237->period_ticks - unsafe_ticks : 1;
     sensor_bulk_reset(&cs1237->sb);
     int ret = cs1237_configure_chip(cs1237);
     if (ret) {
@@ -407,7 +493,8 @@ cs1237_capture_task(void)
     uint8_t oid;
     struct cs1237_adc *cs1237;
     foreach_oid(oid, cs1237, command_config_cs1237) {
-        if (cs1237->flags)
+        uint8_t flags = cs1237->flags;
+        if ((flags & CS_PENDING) && !(flags & CS_READING))
             cs1237_read_adc(cs1237, oid);
     }
 }
