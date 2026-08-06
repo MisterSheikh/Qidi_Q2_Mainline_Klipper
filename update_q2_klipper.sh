@@ -15,6 +15,7 @@ KLIPPER_PATCHES=(
   "patches/klipper/0004-stm32-add-Qidi-Q2-GD32F303-SPI2-mapping.patch"
   "patches/klipper/0005-stm32-add-Q2-GD32F425-MCU-temperature-support.patch"
   "patches/klipper/0006-stm32-add-Q2-GD32F303-120MHz-target.patch"
+  "patches/klipper/0007-stm32-add-Q2-GD32F425-200MHz-support.patch"
 )
 
 Q2_HOME_DIR="${HOME:?HOME is not set}"

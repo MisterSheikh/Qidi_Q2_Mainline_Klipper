@@ -1,0 +1,204 @@
+From 6a1bda1073eeb12ace26a2864832a2803ce84249 Mon Sep 17 00:00:00 2001
+From: Ahmed Sheikh <ahmed.ali.sheikh1998@gmail.com>
+Date: Tue, 28 Jul 2026 17:38:22 -0400
+Subject: [PATCH 7/7] stm32: add Q2 GD32F425 200 MHz support
+
+Use the vendor-defined 200 MHz PLL, high-LDO and high-drive sequence, and
+derive an exact 48 MHz USB clock from PLLSAI. Before the inherited STM32
+SystemInit resets a PLL left active by Katapult, stage down the AHB clock as
+recommended by the current GigaDevice startup code.
+
+---
+ src/stm32/Kconfig   |  11 ++++
+ src/stm32/stm32f4.c | 115 +++++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 121 insertions(+), 5 deletions(-)
+
+diff --git a/src/stm32/Kconfig b/src/stm32/Kconfig
+index da1b47442..cc4b2b692 100644
+--- a/src/stm32/Kconfig
++++ b/src/stm32/Kconfig
+@@ -200,5 +200,6 @@ config CLOCK_FREQ
+ config CLOCK_FREQ
+     int
++    default 200000000 if STM32F4_GD32F425_200MHZ
+     default 48000000 if MACH_STM32F0
+     default 64000000 if MACH_STM32F103 && STM32_CLOCK_REF_INTERNAL
+     default 72000000 if MACH_STM32F103
+@@ -374,6 +375,16 @@ config CLOCK_REF_FREQ
+     default 1 if STM32_CLOCK_REF_INTERNAL
+     default 8000000
+
++config STM32F4_GD32F425_200MHZ
++    bool "Run the Q2 GD32F425 at 200 MHz" if LOW_LEVEL_OPTIONS
++    depends on MACH_GD32F425_Q2 && STM32_CLOCK_REF_8M
++    depends on STM32F4_GD32_USB_INIT_WORKAROUND
++    default n
++    help
++        Run the Qidi Q2 GD32F425 target from its 8 MHz crystal at
++        200 MHz. This enables the GD32 high-drive power mode and
++        supplies an exact 48 MHz USB/SDIO clock from PLLSAI.
++
+ config STM32F0_TRIM
+     int "Internal clock trim override" if LOW_LEVEL_OPTIONS && MACH_STM32F0 && STM32_CLOCK_REF_INTERNAL && !USBSERIAL
+     default 16
+diff --git a/src/stm32/stm32f4.c b/src/stm32/stm32f4.c
+index e5beabee8..5e6762609 100644
+--- a/src/stm32/stm32f4.c
++++ b/src/stm32/stm32f4.c
+@@ -22,6 +22,61 @@
+ #define FREQ_PERIPH (CONFIG_CLOCK_FREQ / FREQ_PERIPH_DIV)
+ #define FREQ_USB 48000000
+
++#if CONFIG_STM32F4_GD32F425_200MHZ
++#if CONFIG_CLOCK_REF_FREQ != 8000000
++#error The Qidi Q2 GD32F425 200 MHz target requires an 8 MHz crystal
++#endif
++#if CONFIG_CLOCK_FREQ != 200000000
++#error The Qidi Q2 GD32F425 200 MHz clock path requires 200 MHz
++#endif
++
++// GD32F425 registers and fields absent from the STM32F407 CMSIS header.
++#define GD32_RCU_PLLSAI (*(volatile uint32_t *)(RCC_BASE + 0x88))
++#define GD32_RCU_ADDCTL (*(volatile uint32_t *)(RCC_BASE + 0xc0))
++#define GD32_RCU_CTL_PLLSAIEN (1U << 28)
++#define GD32_RCU_CTL_PLLSAISTB (1U << 29)
++#define GD32_RCU_ADDCTL_CK48MSEL (1U << 0)
++#define GD32_RCU_ADDCTL_PLL48MSEL (1U << 1)
++#define GD32_PMU_CTL_LDOVS_Msk (3U << 14)
++#define GD32_PMU_CTL_LDOVS_HIGH (3U << 14)
++#define GD32_PMU_CTL_HDEN (1U << 16)
++#define GD32_PMU_CTL_HDS (1U << 17)
++#define GD32_PMU_CS_HDRF (1U << 16)
++#define GD32_PMU_CS_HDSRF (1U << 17)
++#endif
++
++#if CONFIG_STM32F4_GD32F425_200MHZ
++// Safely leave a PLL clock left active by the bootloader. GigaDevice's
++// current startup code recommends staged AHB clock reduction to avoid Vcore
++// fluctuations while changing the system clock.
++static void
++gd32f425_prepare_clock_reset(void)
++{
++    volatile uint32_t delay;
++
++    RCC->CR |= RCC_CR_HSION;
++    while (!(RCC->CR & RCC_CR_HSIRDY))
++        ;
++
++    if ((RCC->CFGR & RCC_CFGR_SWS_Msk) == RCC_CFGR_SWS_PLL) {
++        for (uint32_t hpre = RCC_CFGR_HPRE_DIV2;
++             hpre <= RCC_CFGR_HPRE_DIV16;
++             hpre += 1U << RCC_CFGR_HPRE_Pos) {
++            uint32_t cfgr = RCC->CFGR;
++            RCC->CFGR = ((cfgr & ~RCC_CFGR_HPRE_Msk) | hpre);
++            for (delay = 0; delay < 0x50; delay++)
++                ;
++        }
++    }
++
++    RCC->CFGR &= ~RCC_CFGR_SW_Msk;
++    for (delay = 0; delay < 2000; delay++)
++        ;
++    while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != RCC_CFGR_SWS_HSI)
++        ;
++}
++#endif
++
+ // Map a peripheral address to its enable bits
+ struct cline
+ lookup_clock_line(uint32_t periph_base)
+@@ -93,23 +148,64 @@ static void
+ enable_clock_stm32f40x(void)
+ {
+ #if CONFIG_MACH_STM32F401 || CONFIG_MACH_STM32F4x5
+-    uint32_t pll_base = (CONFIG_STM32_CLOCK_REF_25M) ? 1000000 : 2000000;
++    uint32_t pll_base = (CONFIG_STM32F4_GD32F425_200MHZ
++                         || CONFIG_STM32_CLOCK_REF_25M) ? 1000000 : 2000000;
+     uint32_t pllp = (CONFIG_MACH_STM32F401) ? 4 : 2;
+-    uint32_t pll_freq = CONFIG_CLOCK_FREQ * pllp, pllcfgr;
++    uint32_t pll_freq = CONFIG_CLOCK_FREQ * pllp, pllcfgr, pllq;
+     if (!CONFIG_STM32_CLOCK_REF_INTERNAL) {
+-        // Configure 168Mhz PLL from external crystal (HSE)
++        // Configure the system PLL from an external crystal (HSE)
+         uint32_t div = CONFIG_CLOCK_REF_FREQ / pll_base;
+         RCC->CR |= RCC_CR_HSEON;
++#if CONFIG_STM32F4_GD32F425_200MHZ
++        while (!(RCC->CR & RCC_CR_HSERDY))
++            ;
++#endif
+         pllcfgr = RCC_PLLCFGR_PLLSRC_HSE | (div << RCC_PLLCFGR_PLLM_Pos);
+     } else {
+-        // Configure 168Mhz PLL from internal 16Mhz oscillator (HSI)
++        // Configure the system PLL from the internal 16Mhz oscillator (HSI)
+         uint32_t div = 16000000 / pll_base;
+         pllcfgr = RCC_PLLCFGR_PLLSRC_HSI | (div << RCC_PLLCFGR_PLLM_Pos);
+     }
++#if CONFIG_STM32F4_GD32F425_200MHZ
++    // Select the GD32 high LDO voltage while the main PLL is disabled.
++    enable_pclock(PWR_BASE);
++    PWR->CR = ((PWR->CR & ~GD32_PMU_CTL_LDOVS_Msk)
++               | GD32_PMU_CTL_LDOVS_HIGH);
++    // The main PLL Q output is not used for CK48M in this configuration.
++    pllq = 9;
++#else
++    pllq = pll_freq / FREQ_USB;
++#endif
+     RCC->PLLCFGR = (pllcfgr | ((pll_freq/pll_base) << RCC_PLLCFGR_PLLN_Pos)
+                     | (((pllp >> 1) - 1) << RCC_PLLCFGR_PLLP_Pos)
+-                    | ((pll_freq/FREQ_USB) << RCC_PLLCFGR_PLLQ_Pos));
++                    | (pllq << RCC_PLLCFGR_PLLQ_Pos));
+     RCC->CR |= RCC_CR_PLLON;
++#if CONFIG_STM32F4_GD32F425_200MHZ
++    while (!(RCC->CR & RCC_CR_PLLRDY))
++        ;
++
++    // Enter high-drive mode before selecting the 200 MHz PLL system clock.
++    PWR->CR |= GD32_PMU_CTL_HDEN;
++    while (!(PWR->CSR & GD32_PMU_CS_HDRF))
++        ;
++    PWR->CR |= GD32_PMU_CTL_HDS;
++    while (!(PWR->CSR & GD32_PMU_CS_HDSRF))
++        ;
++
++    // PLLSAI shares the 1 MHz main PLL input: 1 MHz * 192 / 4 = 48 MHz.
++    // Preserve reset-compatible values for the unused Q and R fields.
++    GD32_RCU_PLLSAI = ((192U << 6) | (1U << 16)
++                       | (4U << 24) | (2U << 28));
++    RCC->CR |= GD32_RCU_CTL_PLLSAIEN;
++    while (!(RCC->CR & GD32_RCU_CTL_PLLSAISTB))
++        ;
++
++    // Select PLLSAIP (not the inexact main PLLQ output) as CK48M.
++    GD32_RCU_ADDCTL = ((GD32_RCU_ADDCTL
++                        & ~(GD32_RCU_ADDCTL_CK48MSEL
++                            | GD32_RCU_ADDCTL_PLL48MSEL))
++                       | GD32_RCU_ADDCTL_PLL48MSEL);
++#endif
+ #endif
+ }
+
+@@ -183,8 +279,13 @@ clock_setup(void)
+         enable_clock_stm32f446();
+
+     // Set flash latency
++#if CONFIG_STM32F4_GD32F425_200MHZ
++    // GD32F425 code flash supports zero-wait-state access at 200 MHz.
++    FLASH->ACR = 0;
++#else
+     FLASH->ACR = (FLASH_ACR_LATENCY_5WS | FLASH_ACR_ICEN | FLASH_ACR_DCEN
+                   | FLASH_ACR_PRFTEN);
++#endif
+
+     // Wait for PLL lock
+     while (!(RCC->CR & RCC_CR_PLLRDY))
+@@ -238,6 +339,10 @@ armcm_main(void)
+ {
+     dfu_reboot_check();
+
++#if CONFIG_STM32F4_GD32F425_200MHZ
++    gd32f425_prepare_clock_reset();
++#endif
++
+     // Run SystemInit() and then restore VTOR
+     SystemInit();
+     SCB->VTOR = (uint32_t)VectorTable;

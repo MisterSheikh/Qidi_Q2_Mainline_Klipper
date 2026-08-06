@@ -58,7 +58,7 @@ index 2b3768ec3..69de3b33d 100644
          select MACH_STM32F4
          select MACH_STM32F4x5
 +    config MACH_GD32F425_Q2
-+        bool "GD32F425 (Qidi Q2 mainboard, 168 MHz)"
++        bool "GD32F425 (Qidi Q2 mainboard)"
 +        select MACH_STM32F4
 +        select MACH_STM32F4x5
 +        select STM32F4_GD32_USB_INIT_WORKAROUND if USBSERIAL
