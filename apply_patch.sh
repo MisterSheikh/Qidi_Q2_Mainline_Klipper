@@ -15,6 +15,7 @@ KLIPPER_PATCHES=(
   "$SCRIPT_DIR/patches/klipper/0003-mcu-extend-Q2-multi-MCU-trigger-synchronization-time.patch"
   "$SCRIPT_DIR/patches/klipper/0004-stm32-add-Qidi-Q2-GD32F303-SPI2-mapping.patch"
   "$SCRIPT_DIR/patches/klipper/0005-stm32-add-Q2-GD32F425-MCU-temperature-support.patch"
+  "$SCRIPT_DIR/patches/klipper/0006-stm32-add-Q2-GD32F303-120MHz-target.patch"
 )
 KATAPULT_PATCH="$SCRIPT_DIR/patches/katapult/0001-q2-mainboard-usb.patch"
 
