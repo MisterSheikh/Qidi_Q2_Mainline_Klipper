@@ -10,6 +10,7 @@ This repository documents and hosts the patchset required for running mainline K
 - Qidi's GD32F303 SPI2 mapping for hardware-SPI MAX6675 reads on the toolhead.
 - Toolhead board firmware flow kept in the same repo for reproducible builds.
 - `CS1237` load cell support integrated into the mainline Klipper load-cell stack (`load_cell` / `load_cell_probe`).
+- Optional 200 MHz GD32F425 and 120 MHz GD32F303 Klipper builds.
 
 ## Installation Guidelines
 
@@ -17,6 +18,8 @@ This repository documents and hosts the patchset required for running mainline K
 - Install the host Klipper stack with KIAUH.
 - Start with current upstream Klipper and Katapult checkouts.
 - Clone this repo and run `./apply_patch.sh all`.
+- To use the optional maximum-frequency builds, apply patches 6-7 with
+  `./apply_patch.sh --with-max-clocks all` instead.
 - If a current revision is incompatible, use the known-good fallback listed in
   the known-good matrix instead of forcing the patch.
 - For a fresh installation, flash Katapult via ST-Link, then flash Klipper via
@@ -42,6 +45,8 @@ keep Katapult in place and follow
 up the Klipper source, Python environment, and printer configuration before
 updating the source, reapplying the Q2 patches, and building both MCU images.
 It then presents a post-build choice and defaults to stopping without flashing.
+Its default build uses patches 1-5; `--with-max-clocks` also applies patches
+6-7 and selects the optional maximum-frequency configurations.
 Automatic flashing is only for both MCUs already using the Katapult application
 offsets from this repository's installation instructions: `0x08008000` on the
 mainboard and `0x08002000` on the toolhead.

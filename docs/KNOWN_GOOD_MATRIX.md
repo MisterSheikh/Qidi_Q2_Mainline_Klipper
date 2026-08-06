@@ -8,17 +8,24 @@ patch series.
 
 - Upstream repository: `https://github.com/Klipper3d/klipper.git`
 - Base commit: `9c1ae230eaebd5ec4df76d5a87537e2f35defab0`
-- Patch series:
+- Default patch series:
   1. `patches/klipper/0001-stm32-add-GD32F425-USB-workaround.patch`
   2. `patches/klipper/0002-load_cell-add-CS1237-ADC-support.patch`
   3. `patches/klipper/0003-mcu-extend-Q2-multi-MCU-trigger-synchronization-time.patch`
   4. `patches/klipper/0004-stm32-add-Qidi-Q2-GD32F303-SPI2-mapping.patch`
   5. `patches/klipper/0005-stm32-add-Q2-GD32F425-MCU-temperature-support.patch`
+- Optional maximum-frequency additions:
+  6. `patches/klipper/0006-stm32-add-Q2-GD32F303-120MHz-target.patch`
+  7. `patches/klipper/0007-stm32-add-Q2-GD32F425-200MHz-support.patch`
 
-The ordered patch series applies cleanly at this revision, and both saved MCU
-configurations compile with GNU Arm Embedded Toolchain 10.3-2021.10. The
-toolhead build includes Qidi's hardware-SPI2 mapping for the MAX6675. The
-GD32F425 MCU temperature can be monitored without crashing the mainboard.
+The default patch series and the series with both optional patches apply cleanly
+at this revision. All four saved MCU configurations compile with GNU Arm
+Embedded Toolchain 10.3-2021.10. The toolhead build includes Qidi's
+hardware-SPI2 mapping for the MAX6675. The GD32F425 MCU temperature can be
+monitored without crashing the mainboard. The combined 200 MHz mainboard and
+120 MHz toolhead profile has also been validated on Q2 hardware with both MCU
+links, MCU temperatures, heaters and sensors, homing, bed mesh, and resonance
+testing operating normally.
 
 ## Katapult
 
@@ -44,10 +51,14 @@ patch series.
 
 - Mainboard: `klipper_patch/.main_mcu.config`
 - Toolhead: `klipper_patch/.th_mcu.config`
+- Optional 200 MHz mainboard: `klipper_patch/.main_mcu_200mhz.config`
+- Optional 120 MHz toolhead: `klipper_patch/.th_mcu_120mhz.config`
 
 Key mainboard settings:
 
 - `CONFIG_MCU="stm32f407xx"`
+- `CONFIG_MACH_GD32F425_Q2=y`
+- `CONFIG_CLOCK_FREQ=168000000`
 - `CONFIG_FLASH_APPLICATION_ADDRESS=0x8008000`
 - `CONFIG_STM32F4_GD32_USB_INIT_WORKAROUND=y`
 - `CONFIG_WANT_CS1237=y`
@@ -56,10 +67,16 @@ Key mainboard settings:
 Key toolhead settings:
 
 - `CONFIG_MCU="stm32f103xe"`
+- `CONFIG_CLOCK_FREQ=72000000`
 - `CONFIG_FLASH_APPLICATION_ADDRESS=0x8002000`
 - `CONFIG_SERIAL_BAUD=500000`
 - `CONFIG_WANT_CS1237=y`
 - `CONFIG_WANT_TRIGGER_ANALOG=y`
+
+The optional configurations instead select
+`CONFIG_STM32F4_GD32F425_200MHZ=y` and `CONFIG_CLOCK_FREQ=200000000` for the
+mainboard, and `CONFIG_MACH_GD32F303_Q2=y` with
+`CONFIG_CLOCK_FREQ=120000000` for the toolhead.
 
 ### Katapult
 

@@ -130,6 +130,13 @@ Run the helper script:
 ./apply_patch.sh all
 ```
 
+This applies the default Klipper series, patches 1-5. To also apply the optional
+maximum-frequency support in patches 6-7, use:
+
+```bash
+./apply_patch.sh --with-max-clocks all
+```
+
 By default it targets:
 
 1. `~/klipper`
@@ -245,7 +252,17 @@ make olddefconfig
 make menuconfig
 ```
 
-![image](images/main_mcu_klipper.png)
+If patches 6-7 were selected for the optional maximum-frequency build, use
+`klipper_patch/.main_mcu_200mhz.config` instead.
+
+The saved configuration is authoritative. After `make olddefconfig`, verify:
+
+- Default profile: `GD32F425 (Qidi Q2 mainboard)` at 168 MHz.
+- Maximum-frequency profile: the same GD32F425 target with
+  `Run the Q2 GD32F425 at 200 MHz` enabled.
+
+The older mainboard menuconfig screenshot showed the STM32F407 compatibility
+target and should not be used to select the current processor target.
 
 Then build:
 
@@ -266,6 +283,18 @@ python3 ~/katapult/scripts/flashtool.py \
 ```
 
 After flash, mainboard should run mainline Klipper on GD32F425.
+
+### 7.3 Optional mainboard MCU temperature display
+
+To expose the GD32F425 temperature in Klipper, add:
+
+```ini
+[temperature_sensor Mainboard_MCU]
+sensor_type: temperature_mcu
+sensor_mcu: mcu
+min_temp: 0
+max_temp: 100
+```
 
 ## 8) Toolhead board (GD32F303) Katapult + Klipper
 
@@ -322,9 +351,21 @@ make olddefconfig
 make menuconfig
 ```
 
+If patches 6-7 were selected for the optional maximum-frequency build, use
+`klipper_patch/.th_mcu_120mhz.config` instead.
+
+The saved configuration is authoritative. After `make olddefconfig`, verify:
+
+- Default profile: `STM32F103` at 72 MHz.
+- Maximum-frequency profile: `GD32F303 (Qidi Q2 toolhead, 120 MHz)`.
+
+The screenshot below is a default-profile example. It does not show the
+maximum-frequency GD32F303 selection.
+
 ![image](images/th_mcu_klipper.png)
 
-Make sure you match the settings shown in the image, then press `q` and `y` to save and quit.
+Press `q` and `y` to save and quit after confirming the settings for the
+selected profile.
 
 The patched firmware exposes the Q2 GD32F303 toolhead mapping as
 `spi2_PB14_PC0_PB13`. Use that explicit name in the MAX6675 configuration so

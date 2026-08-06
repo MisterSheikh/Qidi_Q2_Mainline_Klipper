@@ -8,15 +8,18 @@ KLIPPER_KNOWN_GOOD_COMMIT="$(
 )"
 KLIPPER_UPSTREAM_URL="${KLIPPER_UPSTREAM_URL:-https://github.com/Klipper3d/klipper.git}"
 KLIPPER_UPSTREAM_REF="${KLIPPER_UPSTREAM_REF:-master}"
-KLIPPER_PATCHES=(
+KLIPPER_DEFAULT_PATCHES=(
   "patches/klipper/0001-stm32-add-GD32F425-USB-workaround.patch"
   "patches/klipper/0002-load_cell-add-CS1237-ADC-support.patch"
   "patches/klipper/0003-mcu-extend-Q2-multi-MCU-trigger-synchronization-time.patch"
   "patches/klipper/0004-stm32-add-Qidi-Q2-GD32F303-SPI2-mapping.patch"
   "patches/klipper/0005-stm32-add-Q2-GD32F425-MCU-temperature-support.patch"
+)
+KLIPPER_MAX_CLOCK_PATCHES=(
   "patches/klipper/0006-stm32-add-Q2-GD32F303-120MHz-target.patch"
   "patches/klipper/0007-stm32-add-Q2-GD32F425-200MHz-support.patch"
 )
+KLIPPER_PATCHES=("${KLIPPER_DEFAULT_PATCHES[@]}")
 
 Q2_HOME_DIR="${HOME:?HOME is not set}"
 ACTION="${1:-help}"
@@ -44,6 +47,11 @@ KLIPPER_LATEST_COMMIT=""
 FALLBACK_ON_FAILURE=0
 KLIPPER_WAS_STOPPED=0
 BACKUP_DIR=""
+WITH_MAX_CLOCKS=0
+FIRMWARE_PROFILE="default"
+MAINBOARD_CONFIG="$SCRIPT_DIR/klipper_patch/.main_mcu.config"
+TOOLHEAD_CONFIG="$SCRIPT_DIR/klipper_patch/.th_mcu.config"
+APPLY_PATCH_OPTIONS=()
 
 usage() {
   cat <<EOF
@@ -80,6 +88,8 @@ Options:
   --toolhead-device PATH   Toolhead UART path
                            (default: $TOOLHEAD_DEVICE)
   --jobs N                 Parallel build jobs (default: 1 for the stock AP)
+  --with-max-clocks        Also apply patches 6-7 and build the GD32F425 at
+                           200 MHz and GD32F303 at 120 MHz
   --flash-method METHOD    prompt, manual, or katapult (default: $FLASH_METHOD)
                            prompt asks after both images have been built;
                            manual leaves Klipper stopped after building;
@@ -92,6 +102,7 @@ Examples:
   $(basename "$0") check
   $(basename "$0") update
   $(basename "$0") update --flash-method manual
+  $(basename "$0") update --with-max-clocks --flash-method manual
   $(basename "$0") update --klipper-revision known-good --flash-method manual
   $(basename "$0") update --flash-method katapult --main-device <device>
 
@@ -143,7 +154,12 @@ on_exit() {
     if [ "$FALLBACK_ON_FAILURE" -eq 1 ]; then
       warn "The selected Klipper revision failed during patching or building."
       warn "To retry with the documented fallback, run:"
-      printf '  %q update --klipper-revision known-good\n' "$SCRIPT_DIR/update_q2_klipper.sh" >&2
+      printf '  %q update --klipper-revision known-good' \
+        "$SCRIPT_DIR/update_q2_klipper.sh" >&2
+      if [ "$WITH_MAX_CLOCKS" -eq 1 ]; then
+        printf ' --with-max-clocks' >&2
+      fi
+      printf '\n' >&2
     fi
   fi
 }
@@ -211,6 +227,10 @@ parse_options() {
         BUILD_JOBS="$2"
         shift 2
         ;;
+      --with-max-clocks)
+        WITH_MAX_CLOCKS=1
+        shift
+        ;;
       --flash-method)
         [ "$#" -ge 2 ] || die "--flash-method requires manual or katapult"
         FLASH_METHOD="$2"
@@ -250,12 +270,22 @@ parse_options() {
   esac
 }
 
+configure_firmware_profile() {
+  if [ "$WITH_MAX_CLOCKS" -eq 1 ]; then
+    KLIPPER_PATCHES+=("${KLIPPER_MAX_CLOCK_PATCHES[@]}")
+    FIRMWARE_PROFILE="max-clocks"
+    MAINBOARD_CONFIG="$SCRIPT_DIR/klipper_patch/.main_mcu_200mhz.config"
+    TOOLHEAD_CONFIG="$SCRIPT_DIR/klipper_patch/.th_mcu_120mhz.config"
+    APPLY_PATCH_OPTIONS+=(--with-max-clocks)
+  fi
+}
+
 check_meta_repository() {
   local required_patch
 
   require_file "$SCRIPT_DIR/apply_patch.sh"
-  require_file "$SCRIPT_DIR/klipper_patch/.main_mcu.config"
-  require_file "$SCRIPT_DIR/klipper_patch/.th_mcu.config"
+  require_file "$MAINBOARD_CONFIG"
+  require_file "$TOOLHEAD_CONFIG"
   for required_patch in "${KLIPPER_PATCHES[@]}"; do
     require_file "$SCRIPT_DIR/$required_patch"
   done
@@ -412,6 +442,9 @@ resolve_klipper_revision() {
   fi
   if [ "$FIRMWARE_DIR_SET" -eq 0 ]; then
     FIRMWARE_DIR="$Q2_HOME_DIR/q2-firmware/$KLIPPER_BASE_SHORT"
+    if [ "$FIRMWARE_PROFILE" = "max-clocks" ]; then
+      FIRMWARE_DIR="${FIRMWARE_DIR}-max-clocks"
+    fi
   fi
 }
 
@@ -423,7 +456,8 @@ update_active_source() {
   # build material, and then apply the Q2 patch series.
   git -C "$ACTIVE_KLIPPER_DIR" reset --hard "$KLIPPER_BASE_COMMIT"
   git -C "$ACTIVE_KLIPPER_DIR" clean -fdx
-  KLIPPER_DIR="$ACTIVE_KLIPPER_DIR" bash "$SCRIPT_DIR/apply_patch.sh" klipper
+  KLIPPER_DIR="$ACTIVE_KLIPPER_DIR" \
+    bash "$SCRIPT_DIR/apply_patch.sh" "${APPLY_PATCH_OPTIONS[@]}" klipper
 
   git -C "$ACTIVE_KLIPPER_DIR" diff --check ||
     die "The applied Q2 patch series contains whitespace errors"
@@ -485,8 +519,15 @@ build_one_firmware() {
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" 'CONFIG_MCU="stm32f407xx"'
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
         'CONFIG_MACH_GD32F425_Q2=y'
-      require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
-        'CONFIG_CLOCK_FREQ=168000000'
+      if [ "$WITH_MAX_CLOCKS" -eq 1 ]; then
+        require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+          'CONFIG_CLOCK_FREQ=200000000'
+        require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+          'CONFIG_STM32F4_GD32F425_200MHZ=y'
+      else
+        require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+          'CONFIG_CLOCK_FREQ=168000000'
+      fi
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
         'CONFIG_FLASH_APPLICATION_ADDRESS=0x8008000'
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
@@ -495,6 +536,17 @@ build_one_firmware() {
       ;;
     toolhead)
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" 'CONFIG_MCU="stm32f103xe"'
+      if [ "$WITH_MAX_CLOCKS" -eq 1 ]; then
+        require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+          'CONFIG_MACH_GD32F303_Q2=y'
+        require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+          'CONFIG_CLOCK_FREQ=120000000'
+      else
+        require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+          'CONFIG_MACH_STM32F103=y'
+        require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+          'CONFIG_CLOCK_FREQ=72000000'
+      fi
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
         'CONFIG_FLASH_APPLICATION_ADDRESS=0x8002000'
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" 'CONFIG_SERIAL_BAUD=500000'
@@ -522,11 +574,11 @@ build_firmware() {
 
   build_one_firmware \
     mainboard \
-    "$SCRIPT_DIR/klipper_patch/.main_mcu.config" \
+    "$MAINBOARD_CONFIG" \
     "$mainboard_output"
   build_one_firmware \
     toolhead \
-    "$SCRIPT_DIR/klipper_patch/.th_mcu.config" \
+    "$TOOLHEAD_CONFIG" \
     "$toolhead_output"
 
   info "Recording firmware checksums"
@@ -538,6 +590,7 @@ build_firmware() {
   {
     printf 'requested=%s\n' "$KLIPPER_REVISION_REQUEST"
     printf 'resolved=%s\n' "$KLIPPER_BASE_COMMIT"
+    printf 'profile=%s\n' "$FIRMWARE_PROFILE"
   } >"$FIRMWARE_DIR/KLIPPER_REVISION"
   patched_source_sha256 >"$FIRMWARE_DIR/PATCHED_SOURCE_SHA256"
   (
@@ -546,7 +599,8 @@ build_firmware() {
   ) >"$FIRMWARE_DIR/PATCHSET_SHA256SUMS"
   (
     cd "$SCRIPT_DIR"
-    sha256sum -- klipper_patch/.main_mcu.config klipper_patch/.th_mcu.config
+    sha256sum -- "klipper_patch/$(basename "$MAINBOARD_CONFIG")" \
+      "klipper_patch/$(basename "$TOOLHEAD_CONFIG")"
   ) >"$FIRMWARE_DIR/BUILD_CONFIG_SHA256SUMS"
 
   info "Firmware is ready in $FIRMWARE_DIR"
@@ -570,6 +624,8 @@ verify_firmware_artifacts() {
 
   grep -Fqx "$KLIPPER_BASE_COMMIT" "$FIRMWARE_DIR/KLIPPER_BASE" ||
     die "Firmware manifest does not match the selected Klipper base"
+  grep -Fqx "profile=$FIRMWARE_PROFILE" "$FIRMWARE_DIR/KLIPPER_REVISION" ||
+    die "Firmware manifest does not match the selected build profile"
   actual_base="$(git -C "$ACTIVE_KLIPPER_DIR" rev-parse HEAD)"
   [ "$actual_base" = "$KLIPPER_BASE_COMMIT" ] ||
     die "Active Klipper checkout is no longer at the selected base"
@@ -828,6 +884,7 @@ run_update() {
 }
 
 parse_options "$@"
+configure_firmware_profile
 
 case "$ACTION" in
   check)

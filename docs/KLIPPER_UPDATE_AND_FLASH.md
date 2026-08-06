@@ -12,6 +12,10 @@ The patch series provides:
 4. The Q2 GD32F303 SPI2 mapping used by the toolhead MAX6675.
 5. GD32F425 MCU temperature monitoring without crashing the mainboard.
 
+The default update uses patches 1-5, with the mainboard at 168 MHz and the
+toolhead at 72 MHz. Optional patches 6-7 add 200 MHz GD32F425 and 120 MHz
+GD32F303 builds.
+
 ## Choosing a revision
 
 The default update attempt uses the latest commit fetched from upstream
@@ -27,6 +31,9 @@ explicitly if current upstream does not accept or build the patches:
 
 # Known-good fallback
 ./update_q2_klipper.sh update --klipper-revision known-good
+
+# Optional maximum-frequency builds
+./update_q2_klipper.sh update --with-max-clocks
 
 # Specific commit from upstream master history
 ./update_q2_klipper.sh update \
@@ -67,6 +74,13 @@ usable while its software is being replaced.
   with the verified images ready for the appropriate external procedure.
 - The updater backs up but does not rewrite personal printer configuration.
 - It does not home, move, heat, or commission the printer.
+
+The default update builds with `klipper_patch/.main_mcu.config` and
+`klipper_patch/.th_mcu.config`. The `--with-max-clocks` option also applies
+patches 6-7 and builds with `.main_mcu_200mhz.config` and
+`.th_mcu_120mhz.config`. Its default output directory is suffixed with
+`-max-clocks` so it does not replace default-build artifacts for the same
+Klipper revision.
 
 If Katapult is not installed yet,
 [n3oney/qidi-q2-klipper](https://github.com/n3oney/qidi-q2-klipper) documents

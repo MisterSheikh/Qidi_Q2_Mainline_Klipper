@@ -8,16 +8,20 @@ KATAPULT_DIR="${KATAPULT_DIR:-$HOME/katapult}"
 TARGET="all"
 CHECK_ONLY=0
 TARGET_SEEN=0
+WITH_MAX_CLOCKS=0
 
-KLIPPER_PATCHES=(
+KLIPPER_DEFAULT_PATCHES=(
   "$SCRIPT_DIR/patches/klipper/0001-stm32-add-GD32F425-USB-workaround.patch"
   "$SCRIPT_DIR/patches/klipper/0002-load_cell-add-CS1237-ADC-support.patch"
   "$SCRIPT_DIR/patches/klipper/0003-mcu-extend-Q2-multi-MCU-trigger-synchronization-time.patch"
   "$SCRIPT_DIR/patches/klipper/0004-stm32-add-Qidi-Q2-GD32F303-SPI2-mapping.patch"
   "$SCRIPT_DIR/patches/klipper/0005-stm32-add-Q2-GD32F425-MCU-temperature-support.patch"
+)
+KLIPPER_MAX_CLOCK_PATCHES=(
   "$SCRIPT_DIR/patches/klipper/0006-stm32-add-Q2-GD32F303-120MHz-target.patch"
   "$SCRIPT_DIR/patches/klipper/0007-stm32-add-Q2-GD32F425-200MHz-support.patch"
 )
+KLIPPER_PATCHES=("${KLIPPER_DEFAULT_PATCHES[@]}")
 KATAPULT_PATCH="$SCRIPT_DIR/patches/katapult/0001-q2-mainboard-usb.patch"
 
 KLIPPER_KNOWN_GOOD_COMMIT="9c1ae230eaebd5ec4df76d5a87537e2f35defab0"
@@ -25,12 +29,14 @@ KATAPULT_KNOWN_GOOD_COMMIT="b0bf421069e2aab810db43d6e15f38817d981451"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--check] [klipper|katapult|all]
+Usage: $(basename "$0") [--check] [--with-max-clocks] [klipper|katapult|all]
        $(basename "$0") --print-klipper-known-good
        $(basename "$0") --print-katapult-known-good
 
 The default target is all. Patches are checked against each checkout's current
 HEAD. If the check fails, use the known-good revision printed by the helper.
+Klipper patches 1-5 are applied by default. --with-max-clocks also applies
+patches 6-7 for the optional GD32F303 120 MHz and GD32F425 200 MHz builds.
 EOF
 }
 
@@ -130,6 +136,9 @@ for argument in "$@"; do
     --check)
       CHECK_ONLY=1
       ;;
+    --with-max-clocks)
+      WITH_MAX_CLOCKS=1
+      ;;
     klipper|katapult|all)
       [ "$TARGET_SEEN" -eq 0 ] || die "Only one patch target may be specified"
       TARGET="$argument"
@@ -155,6 +164,10 @@ for argument in "$@"; do
       ;;
   esac
 done
+
+if [ "$WITH_MAX_CLOCKS" -eq 1 ]; then
+  KLIPPER_PATCHES+=("${KLIPPER_MAX_CLOCK_PATCHES[@]}")
+fi
 
 case "$TARGET" in
   klipper)
