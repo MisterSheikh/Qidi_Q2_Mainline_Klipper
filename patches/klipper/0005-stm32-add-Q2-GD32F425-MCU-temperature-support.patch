@@ -1,0 +1,109 @@
+From 8bce27a7ec2f0c3bcb4b25dc2ebde6b6978e9f9a Mon Sep 17 00:00:00 2001
+From: Ahmed Sheikh <ahmed.ali.sheikh1998@gmail.com>
+Date: Thu, 6 Aug 2026 15:30:00 -0400
+Subject: [PATCH 5/5] stm32: add Q2 GD32F425 MCU temperature support
+
+---
+ klippy/extras/temperature_mcu.py | 13 ++++++++++---
+ src/stm32/Kconfig                |  7 +++++++
+ src/stm32/adc.c                  |  8 ++++++++
+ 3 files changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/klippy/extras/temperature_mcu.py b/klippy/extras/temperature_mcu.py
+index 686deea24..e1b35a283 100644
+--- a/klippy/extras/temperature_mcu.py
++++ b/klippy/extras/temperature_mcu.py
+@@ -65,9 +65,13 @@ class PrinterTemperatureMCU:
+         mcu = self.mcu_adc.get_mcu()
+         self.debug_read_cmd = mcu.lookup_query_command(
+             "debug_read order=%c addr=%u", "debug_result val=%u")
+-        self.mcu_type = mcu.get_constants().get("MCU", "")
++        constants = mcu.get_constants()
++        self.mcu_type = constants.get("MCU", "")
++        self.temp_sensor_type = constants.get("MCU_TEMPERATURE_TYPE",
++                                              self.mcu_type)
+         # Run MCU specific configuration
+         cfg_funcs = [
++            ('gd32f425', self.config_gd32f425),
+             ('rp2', self.config_rp2040),
+             ('sam3', self.config_sam3), ('sam4', self.config_sam4),
+             ('same70', self.config_same70), ('samd21', self.config_samd21),
+@@ -84,7 +88,7 @@ class PrinterTemperatureMCU:
+             ('stm32h7', self.config_stm32h7),
+             ('', self.config_unknown)]
+         for name, func in cfg_funcs:
+-            if self.mcu_type.startswith(name):
++            if self.temp_sensor_type.startswith(name):
+                 func()
+                 break
+         logging.info("mcu_temperature '%s' nominal base=%.6f slope=%.6f",
+@@ -104,7 +108,10 @@ class PrinterTemperatureMCU:
+                                            min_adc, max_adc)
+     def config_unknown(self):
+         raise self.printer.config_error("MCU temperature not supported on %s"
+-                                        % (self.mcu_type,))
++                                        % (self.temp_sensor_type,))
++    def config_gd32f425(self):
++        self.slope = 3.3 / -.004400
++        self.base_temperature = self.calc_base(25., 1.4 / 3.3)
+     def config_rp2040(self):
+         self.slope = 3.3 / -0.001721
+         self.base_temperature = self.calc_base(27., 0.706 / 3.3)
+diff --git a/src/stm32/Kconfig b/src/stm32/Kconfig
+index 2b3768ec3..69de3b33d 100644
+--- a/src/stm32/Kconfig
++++ b/src/stm32/Kconfig
+@@ -45,6 +45,11 @@ choice
+         bool "STM32F407"
+         select MACH_STM32F4
+         select MACH_STM32F4x5
++    config MACH_GD32F425_Q2
++        bool "GD32F425 (Qidi Q2 mainboard, 168 MHz)"
++        select MACH_STM32F4
++        select MACH_STM32F4x5
++        select STM32F4_GD32_USB_INIT_WORKAROUND if USBSERIAL
+     config MACH_STM32F429
+         bool "STM32F429"
+         select MACH_STM32F4
+@@ -182,6 +187,7 @@ config MCU
+     default "stm32f207xx" if MACH_STM32F207
+     default "stm32f401xc" if MACH_STM32F401
+     default "stm32f405xx" if MACH_STM32F405
++    default "stm32f407xx" if MACH_GD32F425_Q2
+     default "stm32f407xx" if MACH_STM32F407
+     default "stm32f429xx" if MACH_STM32F429
+     default "stm32f446xx" if MACH_STM32F446
+@@ -205,6 +211,7 @@ config CLOCK_FREQ
+     default 72000000 if MACH_STM32F103
+     default 120000000 if MACH_STM32F207
+     default 84000000 if MACH_STM32F401
++    default 168000000 if MACH_GD32F425_Q2
+     default 168000000 if MACH_STM32F4x5
+     default 180000000 if MACH_STM32F446
+     default 216000000 if MACH_STM32F765
+diff --git a/src/stm32/adc.c b/src/stm32/adc.c
+index 39d4f6432..2cc4524aa 100644
+--- a/src/stm32/adc.c
++++ b/src/stm32/adc.c
+@@ -14,6 +14,9 @@
+ #include "sched.h" // sched_shutdown
+
+ DECL_CONSTANT("ADC_MAX", 4095);
++#if CONFIG_MACH_GD32F425_Q2
++DECL_CONSTANT_STR("MCU_TEMPERATURE_TYPE", "gd32f425");
++#endif
+
+ #define ADC_TEMPERATURE_PIN 0xfe
+ DECL_ENUMERATION("pin", "ADC_TEMPERATURE", ADC_TEMPERATURE_PIN);
+@@ -108,6 +111,11 @@ gpio_adc_setup(uint32_t pin)
+     }
+
+     if (pin == ADC_TEMPERATURE_PIN) {
++#if CONFIG_MACH_GD32F425_Q2
++        // GD32F425 specifies at least 17.1us for temperature sampling.
++        adc->SMPR1 = ((adc->SMPR1 & ~ADC_SMPR1_SMP16_Msk)
++                      | (7 << ADC_SMPR1_SMP16_Pos));
++#endif
+ #if CONFIG_MACH_STM32F401
+         ADC1_COMMON->CCR = ADC_CCR_TSVREFE;
+ #elif !CONFIG_MACH_STM32F1

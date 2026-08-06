@@ -9,6 +9,7 @@ This page summarizes the current numbered patch series.
   2. `patches/klipper/0002-load_cell-add-CS1237-ADC-support.patch`
   3. `patches/klipper/0003-mcu-extend-Q2-multi-MCU-trigger-synchronization-time.patch`
   4. `patches/klipper/0004-stm32-add-Qidi-Q2-GD32F303-SPI2-mapping.patch`
+  5. `patches/klipper/0005-stm32-add-Q2-GD32F425-MCU-temperature-support.patch`
 - Katapult: `patches/katapult/0001-q2-mainboard-usb.patch`
 
 These are intended for `git apply` on upstream clones.
@@ -70,6 +71,16 @@ Purpose:
 - Preserve `PB15` for the toolhead heater while using the read-only MAX6675
   on native SPI2.
 - Leave the ordinary STM32F1 `spi2` mapping and default behavior unchanged.
+
+### 0005: Q2 GD32F425 MCU temperature support
+
+- `src/stm32/Kconfig`
+- `src/stm32/adc.c`
+- `klippy/extras/temperature_mcu.py`
+
+Purpose:
+
+- Allow GD32F425 MCU temperature monitoring without crashing the mainboard.
 
 ## Katapult patch scope
 

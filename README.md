@@ -5,6 +5,7 @@ This repository documents and hosts the patchset required for running mainline K
 ## What this enables
 
 - Mainboard (`GD32F425`) running mainline Klipper with stable USB CDC enumeration/communication.
+- GD32F425 MCU temperature monitoring without crashing the mainboard.
 - Mainboard Katapult build with the same GD32 USB workaround.
 - Qidi's GD32F303 SPI2 mapping for hardware-SPI MAX6675 reads on the toolhead.
 - Toolhead board firmware flow kept in the same repo for reproducible builds.

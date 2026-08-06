@@ -13,6 +13,7 @@ KLIPPER_PATCHES=(
   "patches/klipper/0002-load_cell-add-CS1237-ADC-support.patch"
   "patches/klipper/0003-mcu-extend-Q2-multi-MCU-trigger-synchronization-time.patch"
   "patches/klipper/0004-stm32-add-Qidi-Q2-GD32F303-SPI2-mapping.patch"
+  "patches/klipper/0005-stm32-add-Q2-GD32F425-MCU-temperature-support.patch"
 )
 
 Q2_HOME_DIR="${HOME:?HOME is not set}"
@@ -480,6 +481,10 @@ build_one_firmware() {
   case "$board_name" in
     mainboard)
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" 'CONFIG_MCU="stm32f407xx"'
+      require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+        'CONFIG_MACH_GD32F425_Q2=y'
+      require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
+        'CONFIG_CLOCK_FREQ=168000000'
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" \
         'CONFIG_FLASH_APPLICATION_ADDRESS=0x8008000'
       require_config_value "$ACTIVE_KLIPPER_DIR/.config" \

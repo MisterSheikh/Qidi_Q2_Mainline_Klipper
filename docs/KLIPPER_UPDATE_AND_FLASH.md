@@ -10,6 +10,7 @@ The patch series provides:
 2. Native CS1237 load-cell support.
 3. The Q2 multi-MCU trigger-synchronization timeout adjustment.
 4. The Q2 GD32F303 SPI2 mapping used by the toolhead MAX6675.
+5. GD32F425 MCU temperature monitoring without crashing the mainboard.
 
 ## Choosing a revision
 

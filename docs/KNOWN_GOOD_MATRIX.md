@@ -13,10 +13,12 @@ patch series.
   2. `patches/klipper/0002-load_cell-add-CS1237-ADC-support.patch`
   3. `patches/klipper/0003-mcu-extend-Q2-multi-MCU-trigger-synchronization-time.patch`
   4. `patches/klipper/0004-stm32-add-Qidi-Q2-GD32F303-SPI2-mapping.patch`
+  5. `patches/klipper/0005-stm32-add-Q2-GD32F425-MCU-temperature-support.patch`
 
 The ordered patch series applies cleanly at this revision, and both saved MCU
 configurations compile with GNU Arm Embedded Toolchain 10.3-2021.10. The
-toolhead build includes Qidi's hardware-SPI2 mapping for the MAX6675.
+toolhead build includes Qidi's hardware-SPI2 mapping for the MAX6675. The
+GD32F425 MCU temperature can be monitored without crashing the mainboard.
 
 ## Katapult
 
